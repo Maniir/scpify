@@ -63,8 +63,17 @@ mod tcp {
     use std::io::{self, BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use crate::{Device, Response};
+
+    /// Default read timeout applied to every new [`TcpClient`] connection.
+    ///
+    /// If an instrument sends no response within this window, [`TcpClient::query`]
+    /// returns an [`io::Error`] with kind [`io::ErrorKind::TimedOut`] (or
+    /// [`io::ErrorKind::WouldBlock`] on some platforms) instead of blocking
+    /// forever.  Override it per-client with [`TcpClient::set_read_timeout`].
+    pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
     // -----------------------------------------------------------------------
     // TcpServer
@@ -163,6 +172,11 @@ mod tcp {
     /// commands that produce no response and [`TcpClient::query`] (or
     /// [`TcpClient::query_f64`]) for query commands that return a value.
     ///
+    /// A read timeout of [`DEFAULT_READ_TIMEOUT`] (10 s) is set automatically
+    /// on every new connection so that [`TcpClient::query`] returns an error
+    /// instead of hanging when an instrument sends no response.  Call
+    /// [`TcpClient::set_read_timeout`] to adjust or disable the timeout.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -183,10 +197,32 @@ mod tcp {
         ///
         /// Pass any address accepted by [`std::net::TcpStream::connect`], e.g.
         /// `"192.168.1.100:5025"` or `"scope.local:5025"`.
+        ///
+        /// A read timeout of [`DEFAULT_READ_TIMEOUT`] is set on the connection
+        /// automatically.  Use [`TcpClient::set_read_timeout`] to change it.
         pub fn connect(addr: impl ToSocketAddrs) -> io::Result<Self> {
             let stream = TcpStream::connect(addr)?;
-            let reader = BufReader::new(stream.try_clone()?);
+            let reader_stream = stream.try_clone()?;
+            // Set the default read timeout so that query() never hangs
+            // indefinitely when the instrument sends no response.
+            reader_stream.set_read_timeout(Some(DEFAULT_READ_TIMEOUT))?;
+            let reader = BufReader::new(reader_stream);
             Ok(TcpClient { writer: stream, reader })
+        }
+
+        /// Set the read timeout for query responses.
+        ///
+        /// The timeout applies to [`TcpClient::query`] and
+        /// [`TcpClient::query_f64`].  When the timeout expires before a
+        /// response line arrives, those methods return an [`io::Error`] with
+        /// kind [`io::ErrorKind::TimedOut`] (or [`io::ErrorKind::WouldBlock`]
+        /// on some platforms).
+        ///
+        /// Pass `None` to disable the timeout entirely.  **This is not
+        /// recommended** because a non-responsive instrument will then block
+        /// your thread indefinitely.
+        pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+            self.reader.get_ref().set_read_timeout(timeout)
         }
 
         /// Send a command that produces **no response** (e.g. `*RST`, `:RUN`).
@@ -203,6 +239,12 @@ mod tcp {
         /// The command should end with `?` (e.g. `"*IDN?"`,
         /// `":MEASure:VOLTage:DC?"`).  Leading/trailing whitespace is stripped
         /// from the returned string.
+        ///
+        /// If the instrument does not respond within the read timeout (default
+        /// [`DEFAULT_READ_TIMEOUT`], configurable with
+        /// [`TcpClient::set_read_timeout`]), this method returns an
+        /// [`io::Error`] with kind [`io::ErrorKind::TimedOut`] (or
+        /// [`io::ErrorKind::WouldBlock`] on some platforms).
         pub fn query(&mut self, command: &str) -> io::Result<String> {
             writeln!(self.writer, "{}", command)?;
             let mut line = String::new();
@@ -214,6 +256,8 @@ mod tcp {
         ///
         /// Returns an [`io::Error`] with kind [`io::ErrorKind::InvalidData`] if
         /// the response cannot be parsed as a floating-point number.
+        ///
+        /// Inherits the read timeout from [`TcpClient::query`].
         pub fn query_f64(&mut self, command: &str) -> io::Result<f64> {
             let raw = self.query(command)?;
             raw.parse::<f64>().map_err(|e| {
@@ -477,8 +521,52 @@ mod tcp {
             let s = format!("{:?}", client);
             assert!(s.contains("TcpClient"));
         }
+
+        /// Verify the default read timeout is applied and returns an error
+        /// (rather than hanging) when the server never sends a response line.
+        ///
+        /// Uses a raw listener that accepts the connection but never writes
+        /// back, and a very short timeout so the test completes quickly.
+        #[test]
+        fn client_query_times_out_when_no_response() {
+            // Start a "silent" TCP server: accept connections but never reply.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                // Accept one connection and park it — never write anything back.
+                let (_conn, _addr) = listener.accept().unwrap();
+                // Drop _conn at end of test; keep thread alive just long enough.
+                std::thread::sleep(Duration::from_secs(5));
+            });
+
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            // Use a short timeout so the test finishes quickly.
+            client.set_read_timeout(Some(Duration::from_millis(150))).unwrap();
+
+            let err = client.query("*IDN?").unwrap_err();
+            // Both TimedOut and WouldBlock are valid timeout error kinds
+            // depending on the OS.
+            assert!(
+                err.kind() == io::ErrorKind::TimedOut
+                    || err.kind() == io::ErrorKind::WouldBlock,
+                "expected a timeout error, got: {:?}", err
+            );
+        }
+
+        /// Verify that set_read_timeout(None) disables the timeout (the socket
+        /// option is cleared without error).
+        #[test]
+        fn client_set_read_timeout_none() {
+            let port = start_sequential(test_device());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            // Disabling the timeout should not error.
+            client.set_read_timeout(None).unwrap();
+            // A normal query must still work with no timeout set.
+            let resp = client.query("*IDN?").unwrap();
+            assert!(resp.contains("TestCo"), "{}", resp);
+        }
     }
 }
 
 #[cfg(feature = "tcp")]
-pub use tcp::{TcpClient, TcpServer};
+pub use tcp::{TcpClient, TcpServer, DEFAULT_READ_TIMEOUT};

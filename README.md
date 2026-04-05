@@ -65,6 +65,11 @@ fn main() {
 }
 ```
 
+> **Timeout protection:** `TcpClient` sets a **10-second read timeout** by
+> default, so `query()` returns an error instead of hanging if the instrument
+> sends no response.  Override it with `scope.set_read_timeout(Some(Duration::from_secs(30)))`,
+> or disable it entirely with `scope.set_read_timeout(None)`.
+
 ### Checking the connection works
 
 The quickest way to verify your instrument is reachable — no Rust code needed:
