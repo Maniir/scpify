@@ -1,8 +1,8 @@
 # scpify
 
-A Rust library for sending and receiving **SCPI** (Standard Commands for Programmable Instruments / IEEE 488.2) messages.
+A Rust library for sending and receiving **SCPI** (Standard Commands for Programmable Instruments / IEEE 488.2) messages over TCP and other transports.
 
-Embed it in instrument firmware, desktop drivers, or test-automation frameworks to add complete SCPI support with zero external dependencies.
+Use it to **control instruments from a PC** (connect to a scope, DMM, or power supply and send queries) or to **implement a SCPI server** (expose your own device over the network).
 
 ---
 
@@ -10,69 +10,109 @@ Embed it in instrument firmware, desktop drivers, or test-automation frameworks 
 
 | Feature | Description |
 |---|---|
+| **`TcpClient`** *(feature `tcp`)* | Connect from a PC to any SCPI instrument over TCP; send commands and read responses |
+| **`TcpServer`** *(feature `tcp`)* | Host a SCPI server so other programs can control your device over TCP |
 | **Message parser** | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
 | **Mnemonic matching** | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively |
 | **Response types** | Strongly-typed `Response` values formatted to the SCPI standard |
 | **IEEE 488.2 built-ins** | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI` |
 | **Error queue** | SCPI-standard FIFO error queue with standard error codes |
-| **`Device` dispatcher** | Routes messages to registered handlers or IEEE 488.2 built-ins |
-| **TCP transport** *(feature `tcp`)* | `TcpServer` serves SCPI-RAW over TCP (port 5025), sequentially or concurrently |
 
 ---
 
 ## Installation
 
-Add `scpify` to your `Cargo.toml`.
+Add `scpify` to your `Cargo.toml` with the `tcp` feature enabled:
 
-**Without network transport** (embedded / parse-only):
-```toml
-[dependencies]
-scpify = "0.1"
-```
-
-**With TCP transport** (desktop server / test rack):
 ```toml
 [dependencies]
 scpify = { version = "0.1", features = ["tcp"] }
 ```
 
----
+If you only need the message parser and don't need network I/O (e.g. for an embedded device), omit the feature:
 
-## Quick start — in-process (no network)
-
-```rust
-use scpify::{Device, Identification, Response};
-use scpify::command::Command;
-
-// 1. Build a device with its identification string.
-let mut device = Device::new(Identification {
-    manufacturer: "ACME".into(),
-    model: "XT1".into(),
-    serial: "SN001".into(),
-    version: "1.0".into(),
-});
-
-// 2. Register a custom query handler.
-device.register(|cmd: &Command| {
-    if cmd.matches_header("MEASure:VOLTage:DC") && cmd.is_query {
-        Some(Response::Float(3.3))
-    } else {
-        None
-    }
-});
-
-// 3. Process a compound message.
-let responses = device.process("*IDN?;:MEASure:VOLTage:DC?");
-assert_eq!(responses.len(), 2);
-// responses[0] → Response::Str("ACME,XT1,SN001,1.0")
-// responses[1] → Response::Float(3.3)
+```toml
+[dependencies]
+scpify = "0.1"
 ```
 
 ---
 
-## Quick start — TCP server (SCPI-RAW over the network)
+## Quick start — connecting to a scope from a PC
 
-Enable the `tcp` feature (see [Installation](#installation)) then start a server with a few lines:
+This is the most common use case: your PC connects to an oscilloscope (or any SCPI instrument) over TCP and sends queries.
+
+```rust
+use scpify::transport::TcpClient;
+
+fn main() {
+    // Connect to your scope — use its IP address and SCPI port (usually 5025).
+    let mut scope = TcpClient::connect("192.168.1.100:5025")
+        .expect("could not connect to scope");
+
+    // Ask for its identification string.
+    let idn = scope.query("*IDN?").expect("query failed");
+    println!("Connected to: {}", idn);
+    // → "RIGOL TECHNOLOGIES,DS1054Z,DS1ZA…,00.04.04"
+
+    // Send a non-query command (no response expected).
+    scope.send(":RUN").expect("send failed");
+
+    // Read a measurement and parse it as a number.
+    let volts = scope.query_f64(":MEASure:VOLTage:DC?")
+        .expect("measurement failed");
+    println!("DC voltage: {} V", volts);
+}
+```
+
+### Checking the connection works
+
+The quickest way to verify your instrument is reachable — no Rust code needed:
+
+**Using `nc` (netcat) — Linux and macOS:**
+
+```bash
+echo '*IDN?' | nc 192.168.1.100 5025
+# → "RIGOL TECHNOLOGIES,DS1054Z,…"
+```
+
+**Using Python** (cross-platform, no extra packages):
+
+```python
+import socket
+
+def scpi(host, port, command):
+    with socket.create_connection((host, port)) as s:
+        s.sendall((command + '\n').encode())
+        return s.recv(4096).decode().strip()
+
+print(scpi('192.168.1.100', 5025, '*IDN?'))
+print(scpi('192.168.1.100', 5025, ':MEASure:VOLTage:DC?'))
+```
+
+**Using PowerShell** (Windows):
+
+```powershell
+$client = [System.Net.Sockets.TcpClient]::new('192.168.1.100', 5025)
+$stream = $client.GetStream()
+$writer = [System.IO.StreamWriter]::new($stream)
+$reader = [System.IO.StreamReader]::new($stream)
+
+$writer.WriteLine('*IDN?'); $writer.Flush()
+$reader.ReadLine()
+
+$client.Close()
+```
+
+> **Tip:** Non-query commands (e.g. `*RST`, `:RUN`, `:STOP`) produce no response
+> line. Only commands ending in `?` return a value.
+
+---
+
+## Quick start — hosting a SCPI server
+
+Use `TcpServer` when *your application* needs to behave like an instrument so
+that other programs (or physical controllers) can talk to it over SCPI.
 
 ```rust
 use scpify::{Device, Identification, Response};
@@ -87,7 +127,7 @@ fn main() {
         version: "1.0".into(),
     });
 
-    // Register your instrument handlers.
+    // Register custom command handlers.
     device.register(|cmd: &Command| {
         if cmd.matches_header("MEASure:VOLTage:DC") && cmd.is_query {
             Some(Response::Float(3.3))
@@ -103,72 +143,49 @@ fn main() {
 }
 ```
 
-For multi-client support, swap `serve` for `serve_concurrent` (the `Device` is
-shared across threads automatically via `Arc<Mutex<_>>`):
+For multi-client support use `serve_concurrent` (the `Device` is shared
+automatically via `Arc<Mutex<_>>`):
 
 ```rust
 server.serve_concurrent(device).expect("server error");
 ```
 
-### Checking that it works
+---
 
-Once the server is running you can verify it from any terminal — no special
-tools required.
+## Quick start — in-process (no network)
 
-**Using `nc` (netcat) — available on Linux and macOS:**
+Parse and dispatch SCPI messages entirely in memory — no sockets, no threads:
 
-```bash
-# Ask for the instrument identification string
-echo '*IDN?' | nc 127.0.0.1 5025
-# → "ACME,XT1,SN001,1.0"
+```rust
+use scpify::{Device, Identification, Response};
+use scpify::command::Command;
 
-# Send a measurement query
-echo ':MEASure:VOLTage:DC?' | nc 127.0.0.1 5025
-# → 3.300000E0
+let mut device = Device::new(Identification {
+    manufacturer: "ACME".into(),
+    model: "XT1".into(),
+    serial: "SN001".into(),
+    version: "1.0".into(),
+});
 
-# Check the error queue
-echo 'SYSTem:ERRor?' | nc 127.0.0.1 5025
+device.register(|cmd: &Command| {
+    if cmd.matches_header("MEASure:VOLTage:DC") && cmd.is_query {
+        Some(Response::Float(3.3))
+    } else {
+        None
+    }
+});
+
+let responses = device.process("*IDN?;:MEASure:VOLTage:DC?");
+assert_eq!(responses.len(), 2);
+// responses[0] → Response::Str("ACME,XT1,SN001,1.0")
+// responses[1] → Response::Float(3.3)
 ```
-
-**Using Python** (cross-platform, no extra packages needed):
-
-```python
-import socket
-
-def scpi(host, port, command):
-    with socket.create_connection((host, port)) as s:
-        s.sendall((command + '\n').encode())
-        return s.recv(4096).decode().strip()
-
-print(scpi('127.0.0.1', 5025, '*IDN?'))
-# → "ACME,XT1,SN001,1.0"
-
-print(scpi('127.0.0.1', 5025, ':MEASure:VOLTage:DC?'))
-# → 3.300000E0
-```
-
-**Using PowerShell** (Windows):
-
-```powershell
-$client = [System.Net.Sockets.TcpClient]::new('127.0.0.1', 5025)
-$stream = $client.GetStream()
-$writer = [System.IO.StreamWriter]::new($stream)
-$reader = [System.IO.StreamReader]::new($stream)
-
-$writer.WriteLine('*IDN?'); $writer.Flush()
-$reader.ReadLine()   # → "ACME,XT1,SN001,1.0"
-
-$client.Close()
-```
-
-> **Tip:** Non-query commands (e.g. `*RST`, `*CLS`) produce no output on the
-> wire. Only query commands (ending in `?`) receive a response line.
 
 ---
 
 ## Protocol reference
 
-`scpify` implements the **SCPI-RAW** framing convention:
+`scpify` uses the **SCPI-RAW** framing convention (IANA port 5025):
 
 * Each message is a UTF-8 string terminated by `\n` (or `\r\n`).
 * Multiple sub-commands may be separated by `;` in a single message line.
@@ -208,40 +225,19 @@ Standard SCPI error codes are defined in `scpify::error`:
 ## Architecture
 
 ```
-┌────────────────────────────────────────────┐
-│               Your application             │
-│         (firmware / driver / test)         │
-└────────────────────┬───────────────────────┘
-                     │ raw SCPI string
-                     ▼
-              ┌─────────────┐
-              │  tokeniser  │  src/token.rs
-              └──────┬──────┘
-                     │ token stream
-                     ▼
-              ┌─────────────┐
-              │   parser    │  src/parser.rs
-              └──────┬──────┘
-                     │ Vec<Command>
-                     ▼
-              ┌─────────────┐
-              │   Device    │  src/lib.rs
-              │  dispatcher │
-              └──────┬──────┘
-            ┌────────┴────────┐
-            ▼                 ▼
-    IEEE 488.2 built-ins   User handlers
-    src/ieee488.rs         (closures you register)
-            │                 │
-            └────────┬────────┘
-                     │ Vec<Response>
-                     ▼
-          (returned / sent on wire)
+PC / test script                        Instrument / server
+──────────────────                      ───────────────────
+TcpClient::connect()  ←─── TCP ───→    TcpServer::bind()
+TcpClient::query()    ─── "*IDN?" ─→   Device::process()
+                      ←─ response ──   registered handlers / ieee488
+TcpClient::query_f64()─── "MEAS?" ─→
+                      ←── "3.3E0" ──
 ```
 
-The `transport` module (feature `tcp`) sits *above* the `Device` — it reads
-lines from a TCP socket, calls `device.process()`, and writes response lines
-back.
+The `transport` module (feature `tcp`) connects the network layer to the
+`Device` dispatcher. The `Device` parses each line, matches it against
+registered handlers and IEEE 488.2 built-ins, and returns typed `Response`
+values that are written back on the wire.
 
 ---
 

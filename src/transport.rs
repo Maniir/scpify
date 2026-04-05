@@ -1,16 +1,39 @@
-//! Transport adapters for serving SCPI over network links.
+//! Transport adapters for SCPI over TCP network links.
 //!
-//! Enable the **`tcp`** Cargo feature to compile [`TcpServer`].
+//! Enable the **`tcp`** Cargo feature to compile [`TcpClient`] and [`TcpServer`].
 //!
 //! # TCP (SCPI-RAW)
 //!
-//! [`TcpServer`] implements the *SCPI-RAW* protocol: plain TCP with one SCPI
-//! message per line (terminated by `\n` or `\r\n`).  Port **5025** is the
-//! IANA-registered port for this protocol.
+//! Both [`TcpClient`] and [`TcpServer`] use the *SCPI-RAW* protocol: plain TCP
+//! with one SCPI message per line (terminated by `\n` or `\r\n`).  Port
+//! **5025** is the IANA-registered port for this protocol.
 //!
-//! ## Sequential server
+//! ## Connecting to an instrument (scope, DMM, …) from a PC
 //!
-//! Handles one client at a time — simpler, no synchronisation overhead:
+//! Use [`TcpClient`] when your PC is the *controller* and the instrument is
+//! already running a SCPI server (e.g. a Rigol oscilloscope on port 5025):
+//!
+//! ```no_run
+//! use scpify::transport::TcpClient;
+//!
+//! let mut scope = TcpClient::connect("192.168.1.100:5025").expect("connection failed");
+//!
+//! // Query the instrument identification.
+//! let idn = scope.query("*IDN?").expect("query failed");
+//! println!("Connected to: {}", idn);
+//!
+//! // Send a command (no response expected).
+//! scope.send(":RUN").expect("send failed");
+//!
+//! // Query and parse a numeric measurement.
+//! let volts = scope.query_f64(":MEASure:VOLTage:DC?").expect("measurement failed");
+//! println!("DC voltage: {} V", volts);
+//! ```
+//!
+//! ## Hosting a SCPI server (sequential)
+//!
+//! Use [`TcpServer`] when *this* application implements the instrument and
+//! handles one client at a time:
 //!
 //! ```no_run
 //! use scpify::{Device, Identification};
@@ -21,7 +44,7 @@
 //! server.serve(&mut device).expect("server error");
 //! ```
 //!
-//! ## Concurrent server
+//! ## Hosting a SCPI server (concurrent)
 //!
 //! Spawns a thread per connection, sharing the `Device` behind an
 //! `Arc<Mutex<_>>`:
@@ -128,7 +151,90 @@ mod tcp {
     }
 
     // -----------------------------------------------------------------------
-    // Client handlers
+    // TcpClient
+    // -----------------------------------------------------------------------
+
+    /// A SCPI-RAW TCP client.
+    ///
+    /// Connect to an instrument (oscilloscope, multimeter, power supply, …)
+    /// that is already running a SCPI server and send/receive SCPI messages.
+    ///
+    /// Construct with [`TcpClient::connect`], then use [`TcpClient::send`] for
+    /// commands that produce no response and [`TcpClient::query`] (or
+    /// [`TcpClient::query_f64`]) for query commands that return a value.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use scpify::transport::TcpClient;
+    ///
+    /// let mut scope = TcpClient::connect("192.168.1.100:5025").unwrap();
+    /// println!("{}", scope.query("*IDN?").unwrap());
+    /// let v = scope.query_f64(":MEASure:VOLTage:DC?").unwrap();
+    /// println!("DC voltage: {} V", v);
+    /// ```
+    pub struct TcpClient {
+        writer: TcpStream,
+        reader: BufReader<TcpStream>,
+    }
+
+    impl TcpClient {
+        /// Connect to a SCPI instrument at `addr`.
+        ///
+        /// Pass any address accepted by [`std::net::TcpStream::connect`], e.g.
+        /// `"192.168.1.100:5025"` or `"scope.local:5025"`.
+        pub fn connect(addr: impl ToSocketAddrs) -> io::Result<Self> {
+            let stream = TcpStream::connect(addr)?;
+            let reader = BufReader::new(stream.try_clone()?);
+            Ok(TcpClient { writer: stream, reader })
+        }
+
+        /// Send a command that produces **no response** (e.g. `*RST`, `:RUN`).
+        ///
+        /// The command string must **not** end with `?`.  A newline is appended
+        /// automatically.
+        pub fn send(&mut self, command: &str) -> io::Result<()> {
+            writeln!(self.writer, "{}", command)
+        }
+
+        /// Send a query command and return the instrument's response as a
+        /// `String`.
+        ///
+        /// The command should end with `?` (e.g. `"*IDN?"`,
+        /// `":MEASure:VOLTage:DC?"`).  Leading/trailing whitespace is stripped
+        /// from the returned string.
+        pub fn query(&mut self, command: &str) -> io::Result<String> {
+            writeln!(self.writer, "{}", command)?;
+            let mut line = String::new();
+            self.reader.read_line(&mut line)?;
+            Ok(line.trim().to_string())
+        }
+
+        /// Send a query command and parse the response as an `f64`.
+        ///
+        /// Returns an [`io::Error`] with kind [`io::ErrorKind::InvalidData`] if
+        /// the response cannot be parsed as a floating-point number.
+        pub fn query_f64(&mut self, command: &str) -> io::Result<f64> {
+            let raw = self.query(command)?;
+            raw.parse::<f64>().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("expected a numeric response, got {:?}: {}", raw, e),
+                )
+            })
+        }
+    }
+
+    impl std::fmt::Debug for TcpClient {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TcpClient")
+                .field("peer_addr", &self.writer.peer_addr().ok())
+                .finish()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Client handlers (server-side helpers)
     // -----------------------------------------------------------------------
 
     /// Read lines from `stream`, process each as a SCPI message, and write
@@ -334,8 +440,45 @@ mod tcp {
             let s = format!("{:?}", server);
             assert!(s.contains("TcpServer"));
         }
+
+        // --- TcpClient tests -----------------------------------------------
+
+        #[test]
+        fn client_query() {
+            let port = start_sequential(test_device());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            let resp = client.query("*IDN?").unwrap();
+            assert!(resp.contains("TestCo"), "{}", resp);
+        }
+
+        #[test]
+        fn client_query_f64() {
+            let port = start_sequential(test_device());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            let v = client.query_f64(":MEASure:VOLTage?").unwrap();
+            assert!((v - 3.3).abs() < 1e-9, "expected ~3.3, got {}", v);
+        }
+
+        #[test]
+        fn client_send_no_response() {
+            let port = start_sequential(test_device());
+            // send() should not block waiting for a response.
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client.send("*RST").unwrap();
+            // Follow-up query should still work.
+            let resp = client.query("*IDN?").unwrap();
+            assert!(resp.contains("TestCo"), "{}", resp);
+        }
+
+        #[test]
+        fn client_debug_impl() {
+            let port = start_sequential(test_device());
+            let client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            let s = format!("{:?}", client);
+            assert!(s.contains("TcpClient"));
+        }
     }
 }
 
 #[cfg(feature = "tcp")]
-pub use tcp::TcpServer;
+pub use tcp::{TcpClient, TcpServer};
