@@ -9,6 +9,10 @@ keywords = ["scpi", "instrument", "measurement", "ieee488", "test"]
 categories = ["embedded", "hardware-support", "parser-implementations"]
 readme = "README.md"
 
+[features]
+## Enable the TCP transport server (`scpify::transport::TcpServer`).
+tcp = []
+
 [dependencies]
 
 [dev-dependencies]

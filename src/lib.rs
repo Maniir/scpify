@@ -20,6 +20,8 @@
 //!   codes.
 //! * **`Device` struct** — a ready-to-use dispatcher that routes incoming
 //!   messages to registered command handlers or the IEEE 488.2 built-ins.
+//! * **TCP transport** *(feature `tcp`)* — [`transport::TcpServer`] serves
+//!   SCPI-RAW over TCP (port 5025), either sequentially or concurrently.
 //!
 //! ## Quick start
 //!
@@ -54,6 +56,8 @@ pub mod error;
 pub mod ieee488;
 pub mod parser;
 pub mod token;
+#[cfg(feature = "tcp")]
+pub mod transport;
 
 pub use command::{Command, Param, Response, header_matches, mnemonic_matches};
 pub use error::{ErrorQueue, ScpiError};
