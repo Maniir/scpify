@@ -8,15 +8,15 @@ Use it to **control instruments from a PC** (connect to a scope, DMM, or power s
 
 ## Features
 
-| Feature | Description |
-|---|---|
-| **`TcpClient`** *(feature `tcp`)* | Connect from a PC to any SCPI instrument over TCP; send commands and read responses |
-| **`TcpServer`** *(feature `tcp`)* | Host a SCPI server so other programs can control your device over TCP |
-| **Message parser** | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
-| **Mnemonic matching** | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively |
-| **Response types** | Strongly-typed `Response` values formatted to the SCPI standard |
-| **IEEE 488.2 built-ins** | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI` |
-| **Error queue** | SCPI-standard FIFO error queue with standard error codes |
+| Feature                           | Description                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **`TcpClient`** *(feature `tcp`)* | Connect from a PC to any SCPI instrument over TCP; send commands and read responses                        |
+| **`TcpServer`** *(feature `tcp`)* | Host a SCPI server so other programs can control your device over TCP                                      |
+| **Message parser**                | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
+| **Mnemonic matching**             | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively                            |
+| **Response types**                | Strongly-typed `Response` values formatted to the SCPI standard                                            |
+| **IEEE 488.2 built-ins**          | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI`                |
+| **Error queue**                   | SCPI-standard FIFO error queue with standard error codes                                                   |
 
 ---
 
@@ -70,49 +70,6 @@ fn main() {
 > sends no response.  Override it with `scope.set_read_timeout(Some(Duration::from_secs(30)))`,
 > or disable it entirely with `scope.set_read_timeout(None)`.
 
-### Checking the connection works
-
-The quickest way to verify your instrument is reachable — no Rust code needed:
-
-**Using `nc` (netcat) — Linux and macOS:**
-
-```bash
-echo '*IDN?' | nc 192.168.1.100 5025
-# → "RIGOL TECHNOLOGIES,DS1054Z,…"
-```
-
-**Using Python** (cross-platform, no extra packages):
-
-```python
-import socket
-
-def scpi(host, port, command):
-    with socket.create_connection((host, port)) as s:
-        s.sendall((command + '\n').encode())
-        return s.recv(4096).decode().strip()
-
-print(scpi('192.168.1.100', 5025, '*IDN?'))
-print(scpi('192.168.1.100', 5025, ':MEASure:VOLTage:DC?'))
-```
-
-**Using PowerShell** (Windows):
-
-```powershell
-$client = [System.Net.Sockets.TcpClient]::new('192.168.1.100', 5025)
-$stream = $client.GetStream()
-$writer = [System.IO.StreamWriter]::new($stream)
-$reader = [System.IO.StreamReader]::new($stream)
-
-$writer.WriteLine('*IDN?'); $writer.Flush()
-$reader.ReadLine()
-
-$client.Close()
-```
-
-> **Tip:** Non-query commands (e.g. `*RST`, `:RUN`, `:STOP`) produce no response
-> line. Only commands ending in `?` return a value.
-
----
 
 ## Quick start — hosting a SCPI server
 
@@ -198,32 +155,32 @@ assert_eq!(responses.len(), 2);
 
 ### IEEE 488.2 common commands (built-in)
 
-| Command | Description |
-|---|---|
-| `*IDN?` | Identification query |
-| `*RST` | Reset device state |
-| `*CLS` | Clear status registers and error queue |
-| `*ESE <val>` / `*ESE?` | Event Status Enable register |
-| `*ESR?` | Event Status Register (clears on read) |
-| `*OPC` / `*OPC?` | Operation Complete |
-| `*SRE <val>` / `*SRE?` | Service Request Enable register |
-| `*STB?` | Status Byte |
-| `*TST?` | Self-test (returns `0` by default) |
-| `*WAI` | Wait-to-continue |
+| Command                | Description                            |
+| ---------------------- | -------------------------------------- |
+| `*IDN?`                | Identification query                   |
+| `*RST`                 | Reset device state                     |
+| `*CLS`                 | Clear status registers and error queue |
+| `*ESE <val>` / `*ESE?` | Event Status Enable register           |
+| `*ESR?`                | Event Status Register (clears on read) |
+| `*OPC` / `*OPC?`       | Operation Complete                     |
+| `*SRE <val>` / `*SRE?` | Service Request Enable register        |
+| `*STB?`                | Status Byte                            |
+| `*TST?`                | Self-test (returns `0` by default)     |
+| `*WAI`                 | Wait-to-continue                       |
 
 ### Error codes
 
 Standard SCPI error codes are defined in `scpify::error`:
 
-| Constant | Code | Description |
-|---|---|---|
-| `NO_ERROR` | 0 | No error |
-| `COMMAND_ERROR` | −100 | Command error |
-| `UNDEFINED_HEADER` | −113 | Undefined header |
+| Constant            | Code | Description       |
+| ------------------- | ---- | ----------------- |
+| `NO_ERROR`          | 0    | No error          |
+| `COMMAND_ERROR`     | −100 | Command error     |
+| `UNDEFINED_HEADER`  | −113 | Undefined header  |
 | `MISSING_PARAMETER` | −109 | Missing parameter |
-| `EXECUTION_ERROR` | −200 | Execution error |
+| `EXECUTION_ERROR`   | −200 | Execution error   |
 | `DATA_OUT_OF_RANGE` | −222 | Data out of range |
-| `QUERY_ERROR` | −400 | Query error |
+| `QUERY_ERROR`       | −400 | Query error       |
 
 ---
 
