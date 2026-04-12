@@ -277,16 +277,16 @@ mod tcp {
         /// Bufreader to peak at the incoming stream to determine if
         /// the response is actually a binary block.
         pub fn query_raw(&mut self, command: &str) -> io::Result<Vec<u8>> {
-            // 1. Send the command
+            // Send the command
             self.send(command)?;
 
-            // 2. Read first byte
+            // Read first byte
             let mut start_char = [0u8; 1];
             self.reader.read_exact(&mut start_char)?;
             let start_char = start_char[0];
 
             if start_char == b'#' {
-                // 3. Read digit count
+                // Read digit count
                 let mut digit_buf = [0u8; 1];
                 self.reader.read_exact(&mut digit_buf)?;
                 let digit = digit_buf[0];
@@ -302,7 +302,7 @@ mod tcp {
                     return Ok(data);
                 }
 
-                // 4. Read length field
+                // Read length field
                 let mut len_buf = vec![0u8; digit_count];
                 self.reader.read_exact(&mut len_buf)?;
 
@@ -314,11 +314,11 @@ mod tcp {
                     io::Error::new(io::ErrorKind::InvalidData, "Failed to parse data length")
                 })?;
 
-                // 5. Read payload
+                // Read payload
                 let mut payload = vec![0u8; length];
                 self.reader.read_exact(&mut payload)?;
 
-                // 6. Consume trailing newline (handle \n or \r\n)
+                // Consume trailing newline (handle \n or \r\n)
                 let mut trailing = [0u8; 1];
                 if self.reader.read(&mut trailing).is_ok() {
                     if trailing[0] == b'\r' {
