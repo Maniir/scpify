@@ -60,7 +60,7 @@
 
 #[cfg(feature = "tcp")]
 mod tcp {
-    use std::io::{self, BufRead, BufReader, Write};
+    use std::io::{self, BufRead, BufReader, Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -207,7 +207,10 @@ mod tcp {
             // indefinitely when the instrument sends no response.
             reader_stream.set_read_timeout(Some(DEFAULT_READ_TIMEOUT))?;
             let reader = BufReader::new(reader_stream);
-            Ok(TcpClient { writer: stream, reader })
+            Ok(TcpClient {
+                writer: stream,
+                reader,
+            })
         }
 
         /// Set the read timeout for query responses.
@@ -267,6 +270,71 @@ mod tcp {
                 )
             })
         }
+
+        /// Send a query command that supports the IEEE 488.2 binary block format
+        /// Parser identifies the "#" header, caluclates the data lenghth and bypasses
+        /// UTF-8 string conversion using a
+        /// Bufreader to peak at the incoming stream to determine if
+        /// the response is actually a binary block.
+        pub fn query_raw(&mut self, command: &str) -> io::Result<Vec<u8>> {
+            // 1. Send the command
+            self.send(command)?;
+
+            // 2. Read first byte
+            let mut start_char = [0u8; 1];
+            self.reader.read_exact(&mut start_char)?;
+            let start_char = start_char[0];
+
+            if start_char == b'#' {
+                // 3. Read digit count
+                let mut digit_buf = [0u8; 1];
+                self.reader.read_exact(&mut digit_buf)?;
+                let digit = digit_buf[0];
+
+                let digit_count = (digit as char).to_digit(10).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Invalid block header digit")
+                })? as usize;
+
+                // Indefinite-length block (#0 ... \n)
+                if digit_count == 0 {
+                    let mut data = Vec::new();
+                    self.reader.read_until(b'\n', &mut data)?;
+                    return Ok(data);
+                }
+
+                // 4. Read length field
+                let mut len_buf = vec![0u8; digit_count];
+                self.reader.read_exact(&mut len_buf)?;
+
+                let len_str = std::str::from_utf8(&len_buf).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Non-numeric length field")
+                })?;
+
+                let length = len_str.parse::<usize>().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Failed to parse data length")
+                })?;
+
+                // 5. Read payload
+                let mut payload = vec![0u8; length];
+                self.reader.read_exact(&mut payload)?;
+
+                // 6. Consume trailing newline (handle \n or \r\n)
+                let mut trailing = [0u8; 1];
+                if self.reader.read(&mut trailing).is_ok() {
+                    if trailing[0] == b'\r' {
+                        let _ = self.reader.read(&mut trailing); // consume '\n'
+                    }
+                }
+
+                Ok(payload)
+            } else {
+                // FALLBACK: ASCII response
+                let mut response = Vec::new();
+                response.push(start_char);
+                self.reader.read_until(b'\n', &mut response)?;
+                Ok(response)
+            }
+        }
     }
 
     impl std::fmt::Debug for TcpClient {
@@ -291,19 +359,23 @@ mod tcp {
 
     /// Same as [`serve_client`] but acquires a `Mutex` lock per message so
     /// that the `Device` can be shared across threads.
-    fn serve_client_shared(
-        stream: TcpStream,
-        device: Arc<Mutex<Device>>,
-    ) -> io::Result<()> {
+    fn serve_client_shared(stream: TcpStream, device: Arc<Mutex<Device>>) -> io::Result<()> {
         let mut writer = stream.try_clone()?;
         let reader = BufReader::new(stream);
         process_lines(reader, &mut writer, |msg| {
-            device.lock().unwrap_or_else(|e| e.into_inner()).process(msg)
+            device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .process(msg)
         })
     }
 
     /// Core line-processing loop shared by both client handlers.
-    fn process_lines<R, W, F>(reader: BufReader<R>, writer: &mut W, mut dispatch: F) -> io::Result<()>
+    fn process_lines<R, W, F>(
+        reader: BufReader<R>,
+        writer: &mut W,
+        mut dispatch: F,
+    ) -> io::Result<()>
     where
         R: io::Read,
         W: Write,
@@ -390,7 +462,10 @@ mod tcp {
                 if TcpStream::connect(&addr as &str).is_ok() {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "server did not start in time");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "server did not start in time"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -422,7 +497,9 @@ mod tcp {
             let (mut w, mut r) = connect(port);
             let resp = send_recv(&mut w, &mut r, ":MEASure:VOLTage?");
             // Response::Float formats as SCPI scientific notation; parse and compare numerically.
-            let value: f64 = resp.parse().expect("expected a numeric response, got: {resp}");
+            let value: f64 = resp
+                .parse()
+                .expect("expected a numeric response, got: {resp}");
             assert!((value - 3.3).abs() < 1e-9, "expected ~3.3, got {}", value);
         }
 
@@ -430,14 +507,20 @@ mod tcp {
         fn sequential_non_query_produces_no_output() {
             let port = start_sequential(test_device());
             let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(150))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(150)))
+                .unwrap();
             let mut writer = stream.try_clone().unwrap();
             let mut reader = BufReader::new(stream);
             writeln!(writer, "*RST").unwrap();
             let mut buf = String::new();
             // The server sends nothing for non-query commands — read_line should time out.
             let result = reader.read_line(&mut buf);
-            assert!(result.is_err() || buf.is_empty(), "unexpected output: {:?}", buf);
+            assert!(
+                result.is_err() || buf.is_empty(),
+                "unexpected output: {:?}",
+                buf
+            );
         }
 
         #[test]
@@ -541,15 +624,17 @@ mod tcp {
 
             let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
             // Use a short timeout so the test finishes quickly.
-            client.set_read_timeout(Some(Duration::from_millis(150))).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(150)))
+                .unwrap();
 
             let err = client.query("*IDN?").unwrap_err();
             // Both TimedOut and WouldBlock are valid timeout error kinds
             // depending on the OS.
             assert!(
-                err.kind() == io::ErrorKind::TimedOut
-                    || err.kind() == io::ErrorKind::WouldBlock,
-                "expected a timeout error, got: {:?}", err
+                err.kind() == io::ErrorKind::TimedOut || err.kind() == io::ErrorKind::WouldBlock,
+                "expected a timeout error, got: {:?}",
+                err
             );
         }
 
