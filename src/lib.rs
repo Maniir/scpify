@@ -53,15 +53,16 @@
 
 pub mod command;
 pub mod error;
+pub mod helpers;
 pub mod ieee488;
 pub mod parser;
 pub mod token;
 #[cfg(feature = "tcp")]
 pub mod transport;
 
-pub use command::{Command, Param, Response, header_matches, mnemonic_matches};
+pub use command::{header_matches, mnemonic_matches, Command, Param, Response};
 pub use error::{ErrorQueue, ScpiError};
-pub use ieee488::{Identification, Ieee488State, esr, stb};
+pub use ieee488::{esr, stb, Identification, Ieee488State};
 pub use parser::parse;
 
 use crate::error::{COMMAND_ERROR, UNDEFINED_HEADER};
