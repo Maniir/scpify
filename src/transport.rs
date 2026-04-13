@@ -650,6 +650,103 @@ mod tcp {
             let resp = client.query("*IDN?").unwrap();
             assert!(resp.contains("TestCo"), "{}", resp);
         }
+
+        // --- query_raw tests -----------------------------------------------
+
+        /// Bind a listener and spawn a thread that accepts one connection,
+        /// reads one command line, writes `response`, then exits.
+        ///
+        /// The listener is already bound before spawning, so the OS will queue
+        /// the client's connection in the backlog even before `accept()` is
+        /// called — no explicit readiness barrier is needed.
+        fn start_raw_server(response: Vec<u8>) -> u16 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    let _ = reader.read_line(&mut line); // consume the query command
+                    let _ = stream.write_all(&response);
+                }
+            });
+            port
+        }
+
+        /// Definite-length binary block with a single-digit length field.
+        ///
+        /// Wire format: `#15HELLO\n`
+        ///   `#`  – binary block marker
+        ///   `1`  – one digit encodes the length
+        ///   `5`  – length = 5
+        ///   `HELLO` – 5-byte payload
+        ///   `\n` – trailing terminator (must not appear in the returned data)
+        #[test]
+        fn client_query_raw_definite_block() {
+            let port = start_raw_server(b"#15HELLO\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:TRACE?").unwrap();
+            assert_eq!(data, b"HELLO");
+        }
+
+        /// Definite-length block whose trailing terminator is `\r\n` instead of
+        /// just `\n`.  Both bytes must be consumed so they do not appear in the
+        /// returned payload.
+        #[test]
+        fn client_query_raw_definite_block_crlf() {
+            let port = start_raw_server(b"#15HELLO\r\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:TRACE?").unwrap();
+            assert_eq!(data, b"HELLO");
+        }
+
+        /// Definite-length block with a two-digit length field (`#2NN…`).
+        #[test]
+        fn client_query_raw_definite_block_two_digit_length() {
+            let payload = b"abcdefghijkl"; // 12 bytes
+            let mut response = b"#212".to_vec(); // '#' + '2' digits + "12"
+            response.extend_from_slice(payload);
+            response.push(b'\n');
+            let port = start_raw_server(response);
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:TRACE?").unwrap();
+            assert_eq!(data.as_slice(), payload.as_ref());
+        }
+
+        /// Indefinite-length block (`#0`): data is read until `\n`, and that
+        /// terminating newline is included in the returned bytes.
+        #[test]
+        fn client_query_raw_indefinite_block() {
+            let port = start_raw_server(b"#0binary data\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:TRACE?").unwrap();
+            assert_eq!(data, b"binary data\n");
+        }
+
+        /// ASCII fallback: when the first response byte is not `#`, the entire
+        /// line (including the trailing `\n`) is returned verbatim.
+        #[test]
+        fn client_query_raw_ascii_fallback() {
+            let port = start_raw_server(b"3.14159\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("MEAS:VOLT?").unwrap();
+            assert_eq!(data, b"3.14159\n");
+        }
     }
 }
 
