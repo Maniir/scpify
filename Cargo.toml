@@ -12,6 +12,7 @@ readme = "README.md"
 [features]
 ## Enable the TCP transport server (`scpify::transport::TcpServer`).
 tcp = []
+default = ["tcp"]
 
 [dependencies]
 
