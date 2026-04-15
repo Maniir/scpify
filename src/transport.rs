@@ -271,11 +271,24 @@ mod tcp {
             })
         }
 
-        /// Send a query command that supports the IEEE 488.2 binary block format
-        /// Parser identifies the "#" header, caluclates the data lenghth and bypasses
-        /// UTF-8 string conversion using a
-        /// Bufreader to peak at the incoming stream to determine if
-        /// the response is actually a binary block.
+        /// Send a query command that returns an IEEE 488.2 binary block
+        /// response.
+        ///
+        /// The parser identifies the `#` header, calculates the data length,
+        /// and bypasses UTF-8 string conversion, using a `BufReader` to peek
+        /// at the incoming stream to determine whether the response is a
+        /// binary block.
+        ///
+        /// # Streaming (multiple sequential blocks)
+        ///
+        /// Some instruments (e.g. Keysight UXR with `:STReaming ON`) respond
+        /// to a single query with **multiple consecutive** definite-length
+        /// binary blocks (`#NL…L<data>#NL…L<data>…\n`).  This method
+        /// transparently handles that case: after reading each block's
+        /// payload it peeks at the next byte, and if another `#` header
+        /// follows it reads the next block and concatenates the data.  The
+        /// accumulated payload from all blocks is returned as a single
+        /// `Vec<u8>`.
         pub fn query_raw(&mut self, command: &str) -> io::Result<Vec<u8>> {
             // Send the command
             self.send(command)?;
@@ -286,45 +299,79 @@ mod tcp {
             let start_char = start_char[0];
 
             if start_char == b'#' {
-                // Read digit count
-                let mut digit_buf = [0u8; 1];
-                self.reader.read_exact(&mut digit_buf)?;
-                let digit = digit_buf[0];
+                let mut all_data = Vec::new();
 
-                let digit_count = (digit as char).to_digit(10).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "Invalid block header digit")
-                })? as usize;
+                // Loop handles the first block and any subsequent streaming
+                // blocks that follow back-to-back.
+                loop {
+                    // Read digit count
+                    let mut digit_buf = [0u8; 1];
+                    self.reader.read_exact(&mut digit_buf)?;
+                    let digit = digit_buf[0];
 
-                // Indefinite-length block (#0 ... \n)
-                if digit_count == 0 {
-                    let mut data = Vec::new();
-                    self.reader.read_until(b'\n', &mut data)?;
-                    return Ok(data);
+                    let digit_count = (digit as char).to_digit(10).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Invalid block header digit")
+                    })? as usize;
+
+                    // Indefinite-length block (#0 ... \n) — terminates the
+                    // stream; no further blocks can follow.
+                    if digit_count == 0 {
+                        self.reader.read_until(b'\n', &mut all_data)?;
+                        return Ok(all_data);
+                    }
+
+                    // Read length field
+                    let mut len_buf = vec![0u8; digit_count];
+                    self.reader.read_exact(&mut len_buf)?;
+
+                    let len_str = std::str::from_utf8(&len_buf).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Non-numeric length field")
+                    })?;
+
+                    let length = len_str.parse::<usize>().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Failed to parse data length")
+                    })?;
+
+                    // Read payload
+                    let mut payload = vec![0u8; length];
+                    self.reader.read_exact(&mut payload)?;
+                    all_data.extend_from_slice(&payload);
+
+                    // Peek at the next byte to decide whether another block
+                    // follows (streaming) or the response is complete.
+                    let buf = self.reader.fill_buf()?;
+                    if buf.is_empty() {
+                        // Connection closed or EOF — return what we have.
+                        break;
+                    }
+
+                    match buf[0] {
+                        b'#' => {
+                            // Another block follows — consume the '#' and loop.
+                            self.reader.consume(1);
+                            continue;
+                        }
+                        b'\n' => {
+                            self.reader.consume(1);
+                            break;
+                        }
+                        b'\r' => {
+                            self.reader.consume(1);
+                            // Consume the '\n' that follows '\r'.
+                            let buf = self.reader.fill_buf()?;
+                            if !buf.is_empty() && buf[0] == b'\n' {
+                                self.reader.consume(1);
+                            }
+                            break;
+                        }
+                        _ => {
+                            // Unexpected byte after payload — stop reading.
+                            break;
+                        }
+                    }
                 }
 
-                // Read length field
-                let mut len_buf = vec![0u8; digit_count];
-                self.reader.read_exact(&mut len_buf)?;
-
-                let len_str = std::str::from_utf8(&len_buf).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "Non-numeric length field")
-                })?;
-
-                let length = len_str.parse::<usize>().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "Failed to parse data length")
-                })?;
-
-                // Read payload
-                let mut payload = vec![0u8; length];
-                self.reader.read_exact(&mut payload)?;
-
-                // Consume trailing newline (handle \n or \r\n)
-                let mut trailing = [0u8; 1];
-                if self.reader.read(&mut trailing).is_ok() && trailing[0] == b'\r' {
-                    let _ = self.reader.read(&mut trailing); // consume '\n'
-                }
-
-                Ok(payload)
+                Ok(all_data)
             } else {
                 // FALLBACK: ASCII response
                 let mut response = Vec::new();
@@ -744,6 +791,67 @@ mod tcp {
                 .unwrap();
             let data = client.query_raw("MEAS:VOLT?").unwrap();
             assert_eq!(data, b"3.14159\n");
+        }
+
+        // --- streaming (multi-block) query_raw tests -----------------------
+
+        /// Two back-to-back definite-length blocks followed by `\n`.
+        ///
+        /// Wire format: `#15HELLO#15WORLD\n`
+        /// Expected: concatenated payload `HELLOWORLD`.
+        #[test]
+        fn client_query_raw_streaming_two_blocks() {
+            let port = start_raw_server(b"#15HELLO#15WORLD\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:WAV?").unwrap();
+            assert_eq!(data, b"HELLOWORLD");
+        }
+
+        /// Three blocks with different payload sizes, terminated by `\r\n`.
+        ///
+        /// Wire format: `#12AB#13CDE#11F\r\n`
+        /// Expected: concatenated payload `ABCDEF`.
+        #[test]
+        fn client_query_raw_streaming_three_blocks_crlf() {
+            let port = start_raw_server(b"#12AB#13CDE#11F\r\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:WAV?").unwrap();
+            assert_eq!(data, b"ABCDEF");
+        }
+
+        /// Streaming blocks with a two-digit length field to exercise the
+        /// multi-digit header path in the loop.
+        ///
+        /// Wire format: `#212abcdefghijkl#15HELLO\n`
+        /// Expected: concatenated payloads (12 + 5 = 17 bytes).
+        #[test]
+        fn client_query_raw_streaming_multi_digit_length() {
+            let response = b"#212abcdefghijkl#15HELLO\n".to_vec();
+            let port = start_raw_server(response);
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:WAV?").unwrap();
+            assert_eq!(data, b"abcdefghijklHELLO");
+        }
+
+        /// A single block still works as before (no regression).
+        #[test]
+        fn client_query_raw_single_block_still_works() {
+            let port = start_raw_server(b"#15HELLO\n".to_vec());
+            let mut client = TcpClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(2000)))
+                .unwrap();
+            let data = client.query_raw("FETCH:TRACE?").unwrap();
+            assert_eq!(data, b"HELLO");
         }
     }
 }
