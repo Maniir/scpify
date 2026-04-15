@@ -24,9 +24,10 @@
 
 use crate::command::{Command, Response};
 use crate::error::{ErrorQueue, ScpiError, MISSING_PARAMETER, UNDEFINED_HEADER};
+use serde::{Deserialize, Serialize};
 
 /// Identification fields embedded in the instrument.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identification {
     /// Manufacturer name.
     pub manufacturer: String,
@@ -51,7 +52,11 @@ impl Default for Identification {
 
 impl std::fmt::Display for Identification {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{},{},{},{}", self.manufacturer, self.model, self.serial, self.version)
+        write!(
+            f,
+            "{},{},{},{}",
+            self.manufacturer, self.model, self.serial, self.version
+        )
     }
 }
 
@@ -100,7 +105,7 @@ pub mod esr {
 // ---------------------------------------------------------------------------
 
 /// Holds the mutable state required by the IEEE 488.2 common commands.
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ieee488State {
     /// Identification string parts.
     pub identification: Identification,
@@ -164,9 +169,7 @@ pub fn handle_common_command(
     let h = cmd.header.to_ascii_uppercase();
 
     match h.as_str() {
-        "*IDN" if cmd.is_query => {
-            Ok(Response::Str(state.identification.to_string()))
-        }
+        "*IDN" if cmd.is_query => Ok(Response::Str(state.identification.to_string())),
 
         "*RST" if !cmd.is_query => {
             state.ese = 0;
@@ -213,13 +216,9 @@ pub fn handle_common_command(
 
         "*SRE" if cmd.is_query => Ok(Response::Integer(state.sre as i64)),
 
-        "*STB" if cmd.is_query => {
-            Ok(Response::Integer(state.compute_stb(error_queue) as i64))
-        }
+        "*STB" if cmd.is_query => Ok(Response::Integer(state.compute_stb(error_queue) as i64)),
 
-        "*TST" if cmd.is_query => {
-            Ok(Response::Integer(state.self_test_result as i64))
-        }
+        "*TST" if cmd.is_query => Ok(Response::Integer(state.self_test_result as i64)),
 
         "*WAI" if !cmd.is_query => {
             // Synchronous no-op in a single-threaded implementation.

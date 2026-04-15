@@ -15,5 +15,6 @@ tcp = []
 default = ["tcp"]
 
 [dependencies]
+serde = {version = "1.0.228", features = ["derive"]}
 
 [dev-dependencies]

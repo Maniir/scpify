@@ -14,8 +14,10 @@
 //! inside `read_mnemonic`.  The header → parameter boundary is detected by a
 //! one-shot lookahead after each mnemonic token is produced.
 
+use serde::{Deserialize, Serialize};
+
 /// A single token produced by the SCPI lexer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Token<'a> {
     /// A header mnemonic segment, e.g. `"MEASure"`, `"VOLTage"`, `"*IDN"`.
     Mnemonic(&'a str),
@@ -40,6 +42,7 @@ pub fn tokenize(input: &str) -> Tokenizer<'_> {
 }
 
 /// Iterator that produces [`Token`]s from a SCPI message string.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokenizer<'a> {
     src: &'a str,
     pos: usize,
@@ -53,7 +56,12 @@ pub struct Tokenizer<'a> {
 
 impl<'a> Tokenizer<'a> {
     fn new(src: &'a str) -> Self {
-        Tokenizer { src, pos: 0, in_params: false, last_was_colon: true }
+        Tokenizer {
+            src,
+            pos: 0,
+            in_params: false,
+            last_was_colon: true,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -63,9 +71,7 @@ impl<'a> Tokenizer<'a> {
     /// Skip ASCII whitespace.  Returns `true` if any whitespace was consumed.
     fn skip_whitespace(&mut self) -> bool {
         let start = self.pos;
-        while self.pos < self.src.len()
-            && self.src.as_bytes()[self.pos].is_ascii_whitespace()
-        {
+        while self.pos < self.src.len() && self.src.as_bytes()[self.pos].is_ascii_whitespace() {
             self.pos += 1;
         }
         self.pos > start
@@ -102,8 +108,7 @@ impl<'a> Tokenizer<'a> {
         // For non-star mnemonics, strip trailing digits so they are emitted
         // as a separate NumericSuffix token.
         if !raw.starts_with('*') {
-            let alpha_len =
-                raw.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            let alpha_len = raw.trim_end_matches(|c: char| c.is_ascii_digit()).len();
             if alpha_len < raw.len() {
                 // Back up so digits are processed on the next iteration.
                 self.pos = start + alpha_len;
@@ -357,10 +362,7 @@ mod tests {
     fn numeric_param_after_whitespace() {
         // `32` is separated by whitespace — it is a parameter.
         let t = tokens("*ESE 32");
-        assert_eq!(
-            t,
-            vec![Token::Mnemonic("*ESE"), Token::CharParam("32")],
-        );
+        assert_eq!(t, vec![Token::Mnemonic("*ESE"), Token::CharParam("32")],);
     }
 
     #[test]

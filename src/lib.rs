@@ -64,6 +64,7 @@ pub use command::{header_matches, mnemonic_matches, Command, Param, Response};
 pub use error::{ErrorQueue, ScpiError};
 pub use ieee488::{esr, stb, Identification, Ieee488State};
 pub use parser::parse;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{COMMAND_ERROR, UNDEFINED_HEADER};
 use ieee488::handle_common_command;
@@ -91,12 +92,15 @@ type Handler = Box<dyn Fn(&Command) -> Option<Response> + Send + Sync>;
 /// Call [`Device::process`] to handle a raw SCPI message string.  The method
 /// returns one [`Response`] per parsed command (empty responses for
 /// non-query commands, or an error response if no handler matched).
+#[derive(Default, Serialize, Deserialize)]
 pub struct Device {
     /// IEEE 488.2 state (registers + identification).
     pub state: Ieee488State,
     /// SCPI error queue.
+    #[serde(skip)] // don't serialize the error queue
     pub error_queue: ErrorQueue,
     /// User-registered handlers, tried in order.
+    #[serde(skip)] // don't serialize handlers (they can't be serialized)
     handlers: Vec<Handler>,
 }
 

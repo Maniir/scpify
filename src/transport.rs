@@ -320,10 +320,8 @@ mod tcp {
 
                 // Consume trailing newline (handle \n or \r\n)
                 let mut trailing = [0u8; 1];
-                if self.reader.read(&mut trailing).is_ok() {
-                    if trailing[0] == b'\r' {
-                        let _ = self.reader.read(&mut trailing); // consume '\n'
-                    }
+                if self.reader.read(&mut trailing).is_ok() && trailing[0] == b'\r' {
+                    let _ = self.reader.read(&mut trailing); // consume '\n'
                 }
 
                 Ok(payload)
