@@ -1,6 +1,6 @@
 [package]
 name = "scpify"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Rust library for sending and receiving SCPI (Standard Commands for Programmable Instruments) protocol"
 license = "MIT"
@@ -15,5 +15,6 @@ tcp = []
 default = ["tcp"]
 
 [dependencies]
+serde = {version = "1.0.228", features = ["derive"]}
 
 [dev-dependencies]

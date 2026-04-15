@@ -3,6 +3,7 @@
 //! This module defines the structures that represent a parsed SCPI command
 //! ready for dispatch, together with the response value types.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -11,7 +12,7 @@ use std::fmt;
 
 /// A single SCPI parameter value, extracted from the parameter section of a
 /// message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Param {
     /// Character data / mnemonic parameter (e.g. `ON`, `OFF`, `MIN`, `MAX`).
     Character(String),
@@ -87,7 +88,7 @@ impl fmt::Display for Param {
 // ---------------------------------------------------------------------------
 
 /// A fully-parsed SCPI command ready for dispatch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Command {
     /// The command header as a colon-joined path, e.g.
     /// `"MEASure:VOLTage:DC"`.
@@ -127,7 +128,10 @@ pub fn header_matches(received: &str, pattern: &str) -> bool {
     if recv_segs.len() != patt_segs.len() {
         return false;
     }
-    recv_segs.iter().zip(patt_segs.iter()).all(|(r, p)| mnemonic_matches(r, p))
+    recv_segs
+        .iter()
+        .zip(patt_segs.iter())
+        .all(|(r, p)| mnemonic_matches(r, p))
 }
 
 /// Check whether a single mnemonic token `received` matches `pattern`.
