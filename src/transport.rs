@@ -948,7 +948,7 @@ mod hislip {
             }
         }
 
-        /// Serialise the message into a byte buffer ready for the wire.
+        /// Serialize the message into a byte buffer ready for the wire.
         fn encode(&self) -> Vec<u8> {
             let payload_len = self.payload.len() as u64;
             let mut buf = Vec::with_capacity(HEADER_SIZE + self.payload.len());
