@@ -22,6 +22,9 @@
 //!   messages to registered command handlers or the IEEE 488.2 built-ins.
 //! * **TCP transport** *(feature `tcp`)* — [`transport::TcpServer`] serves
 //!   SCPI-RAW over TCP (port 5025), either sequentially or concurrently.
+//! * **HiSLIP transport** *(feature `hislip`)* — [`transport::HislipServer`]
+//!   serves SCPI over HiSLIP (IVI-6.1, port 4880) with binary message
+//!   framing, either sequentially or concurrently.
 //!
 //! ## Quick start
 //!
@@ -57,7 +60,7 @@ pub mod helpers;
 pub mod ieee488;
 pub mod parser;
 pub mod token;
-#[cfg(feature = "tcp")]
+#[cfg(any(feature = "tcp", feature = "hislip"))]
 pub mod transport;
 
 pub use command::{header_matches, mnemonic_matches, Command, Param, Response};
