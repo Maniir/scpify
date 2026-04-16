@@ -1074,16 +1074,11 @@ mod hislip {
     ///               bits 15‒8 = server protocol version major,
     ///               bits  7‒0 = server protocol version minor.
     fn init_response(session_id: u16, initial_credits: u8) -> Message {
-        let overlap_mode = 0u8; // synchronised mode
+        // Synchronised mode: overlap is not requested, so control_code
+        // carries only the initial credit count.
         let response_param = ((session_id as u32) << 16)
             | ((PROTOCOL_VERSION_MAJOR as u32) << 8)
             | (PROTOCOL_VERSION_MINOR as u32);
-        // Per IVI-6.1, control_code in InitializeResponse carries the
-        // initial credit count.
-        let _ = overlap_mode; // synchronised mode — encoded as 0 in bit 0 of control_code is separate from credits
-        // The overlap mode is encoded in the upper bit of control_code (bit 0).
-        // We combine it with the credit count. Since overlap_mode == 0
-        // (synchronised), control_code == initial_credits.
         Message::new(
             MessageType::InitializeResponse,
             initial_credits,
@@ -1486,6 +1481,12 @@ mod hislip {
             }
             Ok(())
         }
+
+        /// Set the credit count to the given value (test-only).
+        #[cfg(test)]
+        fn set_credits(&mut self, credits: u32) {
+            self.credits = credits;
+        }
     }
 
     impl std::fmt::Debug for HislipClient {
@@ -1682,11 +1683,10 @@ mod hislip {
 
         #[test]
         fn client_no_credits_returns_error() {
-            // Create a client manually with 0 credits to test enforcement.
             let port = start_hislip_server(test_device());
             let mut client = HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
-            // Drain credits.
-            client.credits = 0;
+            // Drain credits via test helper.
+            client.set_credits(0);
             let err = client.send("*RST").unwrap_err();
             assert!(
                 err.to_string().contains("credits"),
