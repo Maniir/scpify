@@ -845,6 +845,19 @@ mod hislip {
     /// out-of-memory on malformed frames.
     const MAX_PAYLOAD_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
+    /// Number of initial message credits the server grants to each client
+    /// in the `InitializeResponse` `control_code` field (IVI-6.1 §3.1).
+    const INITIAL_CREDITS: u8 = 1;
+
+    /// Fallback credit count used when a server's `InitializeResponse`
+    /// sets `control_code` to 0 (backward-compatible synchronized mode).
+    const DEFAULT_FALLBACK_CREDITS: u32 = 1;
+
+    /// Timeout applied when waiting for an optional
+    /// `AsyncMaximumMessageSize` message from the client after the async
+    /// channel has been initialized.
+    const ASYNC_MAX_MSG_SIZE_TIMEOUT: Duration = Duration::from_millis(200);
+
     /// Initial MessageID value used by the client (IVI-6.1 §6.3).
     const INITIAL_MESSAGE_ID: u32 = 0xFFFF_FF00;
 
@@ -1089,6 +1102,8 @@ mod hislip {
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
 
+                                handle_async_max_msg_size(&mut s);
+
                                 if let Some(sync_stream) = pending.remove(&session_id) {
                                     // Ignore per-client errors so the server
                                     // keeps accepting new sessions.
@@ -1141,6 +1156,8 @@ mod hislip {
 
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
+
+                                handle_async_max_msg_size(&mut s);
 
                                 if let Some(sync_stream) =
                                     pending.lock().unwrap().remove(&session_id)
@@ -1205,6 +1222,10 @@ mod hislip {
         _async_stream: TcpStream,
         /// Next MessageID to use (incremented by 2 per request).
         message_id: u32,
+        /// Available message-send credits (IVI-6.1 credit-based flow
+        /// control).  Decremented when a `Data`/`DataEnd` is sent;
+        /// replenished when a `DataEnd` response is received.
+        credits: u32,
     }
 
     impl HislipClient {
@@ -1249,6 +1270,15 @@ mod hislip {
 
             let session_id = (init_resp.message_parameter >> 16) as u16;
 
+            // Parse initial credits from the control_code field.
+            // In synchronized mode, if the server sets control_code to 0 we
+            // fall back to DEFAULT_FALLBACK_CREDITS (request-response).
+            let credits = if init_resp.control_code > 0 {
+                init_resp.control_code as u32
+            } else {
+                DEFAULT_FALLBACK_CREDITS
+            };
+
             // -- 2. Open asynchronous channel and perform AsyncInitialize --
             let mut async_stream = TcpStream::connect(addr)?;
             async_stream.set_read_timeout(Some(DEFAULT_HISLIP_READ_TIMEOUT))?;
@@ -1272,10 +1302,31 @@ mod hislip {
                 ));
             }
 
+            // -- 3. Negotiate maximum message size (AsyncMaximumMessageSize) --
+            let max_msg = Message::new(
+                MessageType::AsyncMaximumMessageSize,
+                0,
+                0,
+                MAX_PAYLOAD_SIZE.to_be_bytes().to_vec(),
+            );
+            async_stream.write_all(&max_msg.encode())?;
+
+            let max_resp = Message::decode(&mut async_stream)?;
+            if max_resp.msg_type != MessageType::AsyncMaximumMessageSizeResponse {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected AsyncMaximumMessageSizeResponse, got {:?}",
+                        max_resp.msg_type
+                    ),
+                ));
+            }
+
             Ok(HislipClient {
                 sync_stream,
                 _async_stream: async_stream,
                 message_id: INITIAL_MESSAGE_ID,
+                credits,
             })
         }
 
@@ -1293,20 +1344,34 @@ mod hislip {
             id
         }
 
+        /// Return the number of message-send credits currently available.
+        pub fn credits(&self) -> u32 {
+            self.credits
+        }
+
+        /// Consume one credit and send a `DataEnd` message on the sync
+        /// channel.  Returns an error if no credits are available.
+        fn send_data_end(&mut self, payload: Vec<u8>) -> io::Result<()> {
+            if self.credits == 0 {
+                return Err(io::Error::other(
+                    "no HiSLIP message credits available; \
+                     cannot send until a credit is granted by the server",
+                ));
+            }
+            self.credits -= 1;
+
+            let msg_id = self.next_message_id();
+            let msg = Message::new(MessageType::DataEnd, 0, msg_id, payload);
+            self.sync_stream.write_all(&msg.encode())
+        }
+
         /// Send a SCPI command that produces **no response** (e.g. `*RST`).
         ///
         /// The command is wrapped in a HiSLIP `DataEnd` message.  The server
         /// responds with a `DataEnd` acknowledgement which is read and
         /// discarded automatically.
         pub fn send(&mut self, command: &str) -> io::Result<()> {
-            let msg_id = self.next_message_id();
-            let msg = Message::new(
-                MessageType::DataEnd,
-                0,
-                msg_id,
-                command.as_bytes().to_vec(),
-            );
-            self.sync_stream.write_all(&msg.encode())?;
+            self.send_data_end(command.as_bytes().to_vec())?;
 
             // HiSLIP is request-response: consume the server's reply so
             // it does not interfere with the next query().
@@ -1319,14 +1384,7 @@ mod hislip {
         ///
         /// The command should end with `?` (e.g. `"*IDN?"`).
         pub fn query(&mut self, command: &str) -> io::Result<String> {
-            let msg_id = self.next_message_id();
-            let msg = Message::new(
-                MessageType::DataEnd,
-                0,
-                msg_id,
-                command.as_bytes().to_vec(),
-            );
-            self.sync_stream.write_all(&msg.encode())?;
+            self.send_data_end(command.as_bytes().to_vec())?;
 
             let data = self.read_response()?;
             let text = String::from_utf8(data).map_err(|e| {
@@ -1353,14 +1411,7 @@ mod hislip {
         /// Send a query and return the raw response bytes (useful for
         /// binary / block data).
         pub fn query_raw(&mut self, command: &str) -> io::Result<Vec<u8>> {
-            let msg_id = self.next_message_id();
-            let msg = Message::new(
-                MessageType::DataEnd,
-                0,
-                msg_id,
-                command.as_bytes().to_vec(),
-            );
-            self.sync_stream.write_all(&msg.encode())?;
+            self.send_data_end(command.as_bytes().to_vec())?;
             self.read_response()
         }
 
@@ -1376,6 +1427,9 @@ mod hislip {
                     }
                     MessageType::DataEnd => {
                         buf.extend_from_slice(&msg.payload);
+                        // In synchronized mode each response restores one
+                        // send credit, allowing the next request.
+                        self.credits += 1;
                         return Ok(buf);
                     }
                     MessageType::FatalError | MessageType::Error => {
@@ -1400,6 +1454,7 @@ mod hislip {
             f.debug_struct("HislipClient")
                 .field("peer_addr", &self.sync_stream.peer_addr().ok())
                 .field("message_id", &self.message_id)
+                .field("credits", &self.credits)
                 .finish()
         }
     }
@@ -1409,14 +1464,17 @@ mod hislip {
     // -------------------------------------------------------------------
 
     /// Build an `InitializeResponse` message for the given session ID.
+    ///
+    /// The `control_code` carries the initial message-credit grant so that
+    /// clients know they are allowed to send `Data`/`DataEnd` messages
+    /// (IVI-6.1 §3.1).
     fn init_response(session_id: u16) -> Message {
-        let overlap_mode = 0u8; // synchronised mode
         let response_param = ((session_id as u32) << 16)
             | ((PROTOCOL_VERSION_MAJOR as u32) << 8)
             | (PROTOCOL_VERSION_MINOR as u32);
         Message::new(
             MessageType::InitializeResponse,
-            overlap_mode,
+            INITIAL_CREDITS,
             response_param,
             Vec::new(),
         )
@@ -1425,6 +1483,30 @@ mod hislip {
     /// Build an `AsyncInitializeResponse` message.
     fn async_init_response() -> Message {
         Message::new(MessageType::AsyncInitializeResponse, 0, 0, Vec::new())
+    }
+
+    /// Handle an optional `AsyncMaximumMessageSize` exchange on the async
+    /// channel.  Many real HiSLIP clients send this message immediately
+    /// after `AsyncInitialize`; if it arrives, the server responds with
+    /// `AsyncMaximumMessageSizeResponse`.  A short read-timeout is used so
+    /// clients that omit this step are not penalised.
+    fn handle_async_max_msg_size(stream: &mut TcpStream) {
+        let original_timeout = stream.read_timeout().ok().flatten();
+        let _ = stream.set_read_timeout(Some(ASYNC_MAX_MSG_SIZE_TIMEOUT));
+
+        if let Ok(msg) = Message::decode(stream) {
+            if msg.msg_type == MessageType::AsyncMaximumMessageSize {
+                let resp = Message::new(
+                    MessageType::AsyncMaximumMessageSizeResponse,
+                    0,
+                    0,
+                    MAX_PAYLOAD_SIZE.to_be_bytes().to_vec(),
+                );
+                let _ = stream.write_all(&resp.encode());
+            }
+        }
+
+        let _ = stream.set_read_timeout(original_timeout);
     }
 
     /// Send a `FatalError` message on a stream (best-effort).
@@ -1792,6 +1874,56 @@ mod hislip {
             .unwrap();
             let resp = client.query("*IDN?").unwrap();
             assert!(resp.contains("TestCo"), "{}", resp);
+        }
+
+        // -- Credit tracking -------------------------------------------
+
+        #[test]
+        fn init_response_grants_credits() {
+            let msg = init_response(0);
+            assert_eq!(
+                msg.control_code, INITIAL_CREDITS,
+                "InitializeResponse must carry initial credits in control_code"
+            );
+        }
+
+        #[test]
+        fn client_credits_after_connect() {
+            let port = start_sequential(test_device());
+            let client =
+                HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            assert!(
+                client.credits() >= 1,
+                "client should have at least 1 credit after connecting"
+            );
+        }
+
+        #[test]
+        fn credits_restored_after_query() {
+            let port = start_sequential(test_device());
+            let mut client =
+                HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            let before = client.credits();
+            client.query("*IDN?").unwrap();
+            assert_eq!(
+                client.credits(),
+                before,
+                "credits should be restored after a completed query"
+            );
+        }
+
+        #[test]
+        fn credits_restored_after_send() {
+            let port = start_sequential(test_device());
+            let mut client =
+                HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
+            let before = client.credits();
+            client.send("*RST").unwrap();
+            assert_eq!(
+                client.credits(),
+                before,
+                "credits should be restored after a completed send"
+            );
         }
     }
 }
