@@ -12,6 +12,8 @@ readme = "README.md"
 [features]
 ## Enable the TCP transport server (`scpify::transport::TcpServer`).
 tcp = []
+## Enable the HiSLIP transport (`scpify::transport::HislipClient`, `scpify::transport::HislipServer`).
+hislip = []
 default = ["tcp"]
 
 [dependencies]
