@@ -8,25 +8,40 @@ Use it to **control instruments from a PC** (connect to a scope, DMM, or power s
 
 ## Features
 
-| Feature                           | Description                                                                                                |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **`TcpClient`** *(feature `tcp`)* | Connect from a PC to any SCPI instrument over TCP; send commands and read responses                        |
-| **`TcpServer`** *(feature `tcp`)* | Host a SCPI server so other programs can control your device over TCP                                      |
-| **Message parser**                | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
-| **Mnemonic matching**             | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively                            |
-| **Response types**                | Strongly-typed `Response` values formatted to the SCPI standard                                            |
-| **IEEE 488.2 built-ins**          | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI`                |
-| **Error queue**                   | SCPI-standard FIFO error queue with standard error codes                                                   |
+| Feature                                   | Description                                                                                                |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **`TcpClient`** *(feature `tcp`)*         | Connect from a PC to any SCPI instrument over TCP; send commands and read responses                        |
+| **`TcpServer`** *(feature `tcp`)*         | Host a SCPI server so other programs can control your device over TCP                                      |
+| **`HislipClient`** *(feature `hislip`)*   | Connect from a PC to any SCPI instrument over HiSLIP (IVI-6.1); send commands and read responses           |
+| **`HislipServer`** *(feature `hislip`)*   | Host a HiSLIP server so other programs can control your device using the HiSLIP protocol                   |
+| **Message parser**                        | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
+| **Mnemonic matching**                     | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively                            |
+| **Response types**                        | Strongly-typed `Response` values formatted to the SCPI standard                                            |
+| **IEEE 488.2 built-ins**                  | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI`                |
+| **Error queue**                           | SCPI-standard FIFO error queue with standard error codes                                                   |
 
 ---
 
 ## Installation
 
-Add `scpify` to your `Cargo.toml` with the `tcp` feature enabled:
+Add `scpify` to your `Cargo.toml` with the transport feature(s) you need:
 
 ```toml
+# TCP transport (SCPI-RAW, port 5025) — enabled by default
 [dependencies]
 scpify = { version = "0.1", features = ["tcp"] }
+```
+
+```toml
+# HiSLIP transport (IVI-6.1, port 4880)
+[dependencies]
+scpify = { version = "0.1", features = ["hislip"] }
+```
+
+```toml
+# Both transports
+[dependencies]
+scpify = { version = "0.1", features = ["tcp", "hislip"] }
 ```
 
 If you only need the message parser and don't need network I/O (e.g. for an embedded device), omit the feature:
@@ -114,6 +129,57 @@ server.serve_concurrent(device).expect("server error");
 
 ---
 
+## Quick start — connecting via HiSLIP
+
+Use `HislipClient` to connect to an instrument over HiSLIP (IVI-6.1, port 4880):
+
+```rust
+use scpify::transport::HislipClient;
+
+fn main() {
+    let mut inst = HislipClient::connect("192.168.1.100:4880")
+        .expect("could not connect");
+
+    let idn = inst.query("*IDN?").expect("query failed");
+    println!("Connected to: {}", idn);
+
+    let volts = inst.query_f64(":MEASure:VOLTage:DC?")
+        .expect("measurement failed");
+    println!("DC voltage: {} V", volts);
+}
+```
+
+## Quick start — hosting a HiSLIP server
+
+```rust
+use scpify::{Device, Identification, Response};
+use scpify::command::Command;
+use scpify::transport::HislipServer;
+
+fn main() {
+    let mut device = Device::new(Identification {
+        manufacturer: "ACME".into(),
+        model: "XT1".into(),
+        serial: "SN001".into(),
+        version: "1.0".into(),
+    });
+
+    device.register(|cmd: &Command| {
+        if cmd.matches_header("MEASure:VOLTage:DC") && cmd.is_query {
+            Some(Response::Float(3.3))
+        } else {
+            None
+        }
+    });
+
+    let server = HislipServer::bind("0.0.0.0:4880").expect("failed to bind");
+    println!("Listening on port 4880…");
+    server.serve(&mut device).expect("server error");
+}
+```
+
+---
+
 ## Quick start — in-process (no network)
 
 Parse and dispatch SCPI messages entirely in memory — no sockets, no threads:
@@ -194,12 +260,21 @@ TcpClient::query()    ─── "*IDN?" ─→   Device::process()
                       ←─ response ──   registered handlers / ieee488
 TcpClient::query_f64()─── "MEAS?" ─→
                       ←── "3.3E0" ──
+
+HislipClient::connect() ← HiSLIP →    HislipServer::bind()
+HislipClient::query()  ── DataEnd ─→   Device::process()
+                       ←─ DataEnd ──   registered handlers / ieee488
 ```
 
-The `transport` module (feature `tcp`) connects the network layer to the
-`Device` dispatcher. The `Device` parses each line, matches it against
-registered handlers and IEEE 488.2 built-ins, and returns typed `Response`
-values that are written back on the wire.
+The `transport` module connects the network layer to the `Device` dispatcher.
+The `Device` parses each message, matches it against registered handlers and
+IEEE 488.2 built-ins, and returns typed `Response` values that are written
+back on the wire.
+
+* **TCP** (feature `tcp`) uses SCPI-RAW framing (line-oriented, port 5025).
+* **HiSLIP** (feature `hislip`) uses the IVI-6.1 binary framing protocol
+  (16-byte message headers, port 4880) with synchronous and asynchronous TCP
+  channels.
 
 ---
 
