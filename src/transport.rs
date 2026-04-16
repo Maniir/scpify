@@ -849,6 +849,15 @@ mod hislip {
     /// in the `InitializeResponse` `control_code` field (IVI-6.1 §3.1).
     const INITIAL_CREDITS: u8 = 1;
 
+    /// Fallback credit count used when a server's `InitializeResponse`
+    /// sets `control_code` to 0 (backward-compatible synchronized mode).
+    const DEFAULT_FALLBACK_CREDITS: u32 = 1;
+
+    /// Timeout applied when waiting for an optional
+    /// `AsyncMaximumMessageSize` message from the client after the async
+    /// channel has been initialized.
+    const ASYNC_MAX_MSG_SIZE_TIMEOUT: Duration = Duration::from_millis(200);
+
     /// Initial MessageID value used by the client (IVI-6.1 §6.3).
     const INITIAL_MESSAGE_ID: u32 = 0xFFFF_FF00;
 
@@ -1262,12 +1271,12 @@ mod hislip {
             let session_id = (init_resp.message_parameter >> 16) as u16;
 
             // Parse initial credits from the control_code field.
-            // In synchronised mode, if the server sets control_code to 0 we
-            // fall back to an implicit 1 credit (request-response).
+            // In synchronized mode, if the server sets control_code to 0 we
+            // fall back to DEFAULT_FALLBACK_CREDITS (request-response).
             let credits = if init_resp.control_code > 0 {
                 init_resp.control_code as u32
             } else {
-                1
+                DEFAULT_FALLBACK_CREDITS
             };
 
             // -- 2. Open asynchronous channel and perform AsyncInitialize --
@@ -1418,7 +1427,7 @@ mod hislip {
                     }
                     MessageType::DataEnd => {
                         buf.extend_from_slice(&msg.payload);
-                        // In synchronised mode each response restores one
+                        // In synchronized mode each response restores one
                         // send credit, allowing the next request.
                         self.credits += 1;
                         return Ok(buf);
@@ -1483,7 +1492,7 @@ mod hislip {
     /// clients that omit this step are not penalised.
     fn handle_async_max_msg_size(stream: &mut TcpStream) {
         let original_timeout = stream.read_timeout().ok().flatten();
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+        let _ = stream.set_read_timeout(Some(ASYNC_MAX_MSG_SIZE_TIMEOUT));
 
         if let Ok(msg) = Message::decode(stream) {
             if msg.msg_type == MessageType::AsyncMaximumMessageSize {
