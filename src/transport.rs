@@ -1236,10 +1236,12 @@ mod hislip {
             let mut sync_stream = TcpStream::connect(addr.clone())?;
             sync_stream.set_read_timeout(Some(DEFAULT_HISLIP_READ_TIMEOUT))?;
 
-            let version_param = (PROTOCOL_VERSION_MINOR as u32) << 16; // vendor ID = 0
+            let client_version =
+                ((PROTOCOL_VERSION_MAJOR as u32) << 8) | (PROTOCOL_VERSION_MINOR as u32);
+            let version_param = client_version << 16; // vendor ID = 0
             let init_msg = Message::new(
                 MessageType::Initialize,
-                PROTOCOL_VERSION_MAJOR,
+                0,
                 version_param,
                 sub_address.as_bytes().to_vec(),
             );
@@ -1897,10 +1899,12 @@ mod hislip {
         fn initialize_message_encodes_version_and_sub_address() {
             // Mirrors what the client builds in connect_with_sub_address
             let sub_address = "hislip0";
-            let version_param = (PROTOCOL_VERSION_MINOR as u32) << 16;
+            let client_version =
+                ((PROTOCOL_VERSION_MAJOR as u32) << 8) | (PROTOCOL_VERSION_MINOR as u32);
+            let version_param = client_version << 16; // vendor ID = 0
             let msg = Message::new(
                 MessageType::Initialize,
-                PROTOCOL_VERSION_MAJOR,
+                0,
                 version_param,
                 sub_address.as_bytes().to_vec(),
             );
@@ -1909,11 +1913,14 @@ mod hislip {
             let decoded = Message::decode(&mut &encoded[..]).unwrap();
 
             assert_eq!(decoded.msg_type, MessageType::Initialize);
-            assert_eq!(decoded.control_code, PROTOCOL_VERSION_MAJOR);
-            // In the Initialize message, minor version is packed into the
+            assert_eq!(decoded.control_code, 0);
+            // In the Initialize message, version is packed into the
             // upper 16 bits of message_parameter (vendor ID = 0 in lower 16).
-            let decoded_minor = (decoded.message_parameter >> 16) as u16;
-            assert_eq!(decoded_minor, PROTOCOL_VERSION_MINOR);
+            let decoded_version = (decoded.message_parameter >> 16) as u16;
+            let major = (decoded_version >> 8) as u8;
+            let minor = (decoded_version & 0xFF) as u8;
+            assert_eq!(major, PROTOCOL_VERSION_MAJOR);
+            assert_eq!(minor, PROTOCOL_VERSION_MINOR as u8);
             assert_eq!(decoded.payload, sub_address.as_bytes());
         }
 
