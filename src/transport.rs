@@ -1180,8 +1180,8 @@ mod hislip {
                                         // arrives while the server is waiting
                                         // for SCPI commands on the sync
                                         // channel).
-                                        let mut async_s = s;
-                                        handle_async_max_msg_size(&mut async_s);
+                                        let mut async_stream = s;
+                                        handle_async_max_msg_size(&mut async_stream);
                                         let _ =
                                             serve_hislip_client_shared(sync_stream, dev);
                                     });
@@ -1975,7 +1975,7 @@ mod hislip {
             let addr = format!("127.0.0.1:{}", port);
 
             // -- Sync channel --
-            let mut sync = TcpStream::connect(&addr as &str)?;
+            let mut sync = TcpStream::connect(&addr)?;
             sync.set_read_timeout(Some(Duration::from_secs(5)))?;
 
             let init = Message::new(
@@ -1991,7 +1991,7 @@ mod hislip {
             let session_id = (init_resp.message_parameter >> 16) as u16;
 
             // -- Async channel --
-            let mut async_s = TcpStream::connect(&addr as &str)?;
+            let mut async_s = TcpStream::connect(&addr)?;
             async_s.set_read_timeout(Some(Duration::from_secs(5)))?;
 
             let async_init = Message::new(
