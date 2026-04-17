@@ -845,14 +845,6 @@ mod hislip {
     /// out-of-memory on malformed frames.
     const MAX_PAYLOAD_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
-    /// Number of initial message credits the server grants to each client
-    /// in the `InitializeResponse` `control_code` field (IVI-6.1 §3.1).
-    const INITIAL_CREDITS: u8 = 1;
-
-    /// Fallback credit count used when a server's `InitializeResponse`
-    /// sets `control_code` to 0 (backward-compatible synchronized mode).
-    const DEFAULT_FALLBACK_CREDITS: u32 = 1;
-
     /// Timeout applied when waiting for an optional
     /// `AsyncMaximumMessageSize` message from the client after the async
     /// channel has been initialized.
@@ -1097,7 +1089,7 @@ mod hislip {
                                 pending.insert(session_id, s);
                             }
                             MessageType::AsyncInitialize => {
-                                let session_id = (msg.message_parameter >> 16) as u16;
+                                let session_id = (msg.message_parameter & 0xFFFF) as u16;
 
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
@@ -1152,7 +1144,7 @@ mod hislip {
                                 pending.lock().unwrap().insert(session_id, s);
                             }
                             MessageType::AsyncInitialize => {
-                                let session_id = (msg.message_parameter >> 16) as u16;
+                                let session_id = (msg.message_parameter & 0xFFFF) as u16;
 
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
@@ -1222,10 +1214,6 @@ mod hislip {
         _async_stream: TcpStream,
         /// Next MessageID to use (incremented by 2 per request).
         message_id: u32,
-        /// Available message-send credits (IVI-6.1 credit-based flow
-        /// control).  Decremented when a `Data`/`DataEnd` is sent;
-        /// replenished when a `DataEnd` response is received.
-        credits: u32,
     }
 
     impl HislipClient {
@@ -1248,10 +1236,12 @@ mod hislip {
             let mut sync_stream = TcpStream::connect(addr.clone())?;
             sync_stream.set_read_timeout(Some(DEFAULT_HISLIP_READ_TIMEOUT))?;
 
-            let version_param = (PROTOCOL_VERSION_MINOR as u32) << 16; // vendor ID = 0
+            let client_version =
+                ((PROTOCOL_VERSION_MAJOR as u32) << 8) | (PROTOCOL_VERSION_MINOR as u32);
+            let version_param = client_version << 16; // vendor ID = 0
             let init_msg = Message::new(
                 MessageType::Initialize,
-                PROTOCOL_VERSION_MAJOR,
+                0,
                 version_param,
                 sub_address.as_bytes().to_vec(),
             );
@@ -1268,16 +1258,8 @@ mod hislip {
                 ));
             }
 
-            let session_id = (init_resp.message_parameter >> 16) as u16;
-
-            // Parse initial credits from the control_code field.
-            // In synchronized mode, if the server sets control_code to 0 we
-            // fall back to DEFAULT_FALLBACK_CREDITS (request-response).
-            let credits = if init_resp.control_code > 0 {
-                init_resp.control_code as u32
-            } else {
-                DEFAULT_FALLBACK_CREDITS
-            };
+            // Session ID is in the lower word of message_parameter (IVI-6.1 §3.1).
+            let session_id = (init_resp.message_parameter & 0xFFFF) as u16;
 
             // -- 2. Open asynchronous channel and perform AsyncInitialize --
             let mut async_stream = TcpStream::connect(addr)?;
@@ -1286,7 +1268,7 @@ mod hislip {
             let async_init = Message::new(
                 MessageType::AsyncInitialize,
                 0,
-                (session_id as u32) << 16,
+                session_id as u32, // session_id in lower word of message_parameter
                 Vec::new(),
             );
             async_stream.write_all(&async_init.encode())?;
@@ -1302,31 +1284,10 @@ mod hislip {
                 ));
             }
 
-            // -- 3. Negotiate maximum message size (AsyncMaximumMessageSize) --
-            let max_msg = Message::new(
-                MessageType::AsyncMaximumMessageSize,
-                0,
-                0,
-                MAX_PAYLOAD_SIZE.to_be_bytes().to_vec(),
-            );
-            async_stream.write_all(&max_msg.encode())?;
-
-            let max_resp = Message::decode(&mut async_stream)?;
-            if max_resp.msg_type != MessageType::AsyncMaximumMessageSizeResponse {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "expected AsyncMaximumMessageSizeResponse, got {:?}",
-                        max_resp.msg_type
-                    ),
-                ));
-            }
-
             Ok(HislipClient {
                 sync_stream,
                 _async_stream: async_stream,
                 message_id: INITIAL_MESSAGE_ID,
-                credits,
             })
         }
 
@@ -1344,22 +1305,8 @@ mod hislip {
             id
         }
 
-        /// Return the number of message-send credits currently available.
-        pub fn credits(&self) -> u32 {
-            self.credits
-        }
-
-        /// Consume one credit and send a `DataEnd` message on the sync
-        /// channel.  Returns an error if no credits are available.
+        /// Send a `DataEnd` message on the sync channel.
         fn send_data_end(&mut self, payload: Vec<u8>) -> io::Result<()> {
-            if self.credits == 0 {
-                return Err(io::Error::other(
-                    "no HiSLIP message credits available; \
-                     cannot send until a credit is granted by the server",
-                ));
-            }
-            self.credits -= 1;
-
             let msg_id = self.next_message_id();
             let msg = Message::new(MessageType::DataEnd, 0, msg_id, payload);
             self.sync_stream.write_all(&msg.encode())
@@ -1367,16 +1314,11 @@ mod hislip {
 
         /// Send a SCPI command that produces **no response** (e.g. `*RST`).
         ///
-        /// The command is wrapped in a HiSLIP `DataEnd` message.  The server
-        /// responds with a `DataEnd` acknowledgement which is read and
-        /// discarded automatically.
+        /// The command is wrapped in a HiSLIP `DataEnd` message.  Per the
+        /// IVI-6.1 spec, non-query commands do not elicit a response from
+        /// the server, so this method returns immediately after sending.
         pub fn send(&mut self, command: &str) -> io::Result<()> {
-            self.send_data_end(command.as_bytes().to_vec())?;
-
-            // HiSLIP is request-response: consume the server's reply so
-            // it does not interfere with the next query().
-            let _resp = self.read_response()?;
-            Ok(())
+            self.send_data_end(command.as_bytes().to_vec())
         }
 
         /// Send a query command and return the instrument's response as a
@@ -1427,9 +1369,6 @@ mod hislip {
                     }
                     MessageType::DataEnd => {
                         buf.extend_from_slice(&msg.payload);
-                        // In synchronized mode each response restores one
-                        // send credit, allowing the next request.
-                        self.credits += 1;
                         return Ok(buf);
                     }
                     MessageType::FatalError | MessageType::Error => {
@@ -1454,7 +1393,6 @@ mod hislip {
             f.debug_struct("HislipClient")
                 .field("peer_addr", &self.sync_stream.peer_addr().ok())
                 .field("message_id", &self.message_id)
-                .field("credits", &self.credits)
                 .finish()
         }
     }
@@ -1465,16 +1403,16 @@ mod hislip {
 
     /// Build an `InitializeResponse` message for the given session ID.
     ///
-    /// The `control_code` carries the initial message-credit grant so that
-    /// clients know they are allowed to send `Data`/`DataEnd` messages
-    /// (IVI-6.1 §3.1).
+    /// `message_parameter` layout (IVI-6.1 §3.1):
+    ///   - upper word (bits 31-16): server protocol version
+    ///   - lower word (bits 15-0): session ID
     fn init_response(session_id: u16) -> Message {
-        let response_param = ((session_id as u32) << 16)
-            | ((PROTOCOL_VERSION_MAJOR as u32) << 8)
-            | (PROTOCOL_VERSION_MINOR as u32);
+        let server_version =
+            ((PROTOCOL_VERSION_MAJOR as u32) << 8) | (PROTOCOL_VERSION_MINOR as u32);
+        let response_param = (server_version << 16) | (session_id as u32);
         Message::new(
             MessageType::InitializeResponse,
-            INITIAL_CREDITS,
+            0, // control_code: no overlap (IVI-6.1 §3.1)
             response_param,
             Vec::new(),
         )
@@ -1567,26 +1505,28 @@ mod hislip {
                     let command = String::from_utf8_lossy(&accumulated);
                     let command = command.trim();
 
-                    let response_text = if command.is_empty() {
-                        String::new()
-                    } else {
+                    if !command.is_empty() {
                         let responses = dispatch(command);
-                        responses
+                        let response_text: String = responses
                             .iter()
                             .filter(|r| **r != Response::Empty)
                             .map(|r| r.to_string())
                             .collect::<Vec<_>>()
-                            .join("\n")
-                    };
+                            .join("\n");
 
-                    // Server response uses (client_msg_id | 1).
-                    let resp_msg = Message::new(
-                        MessageType::DataEnd,
-                        0,
-                        msg.message_parameter | 1,
-                        response_text.into_bytes(),
-                    );
-                    stream.write_all(&resp_msg.encode())?;
+                        // Only send a response if the command produced
+                        // output (i.e. it was a query).  Non-query commands
+                        // do not generate a HiSLIP reply per IVI-6.1.
+                        if !response_text.is_empty() {
+                            let resp_msg = Message::new(
+                                MessageType::DataEnd,
+                                0,
+                                msg.message_parameter | 1,
+                                response_text.into_bytes(),
+                            );
+                            stream.write_all(&resp_msg.encode())?;
+                        }
+                    }
 
                     accumulated.clear();
                 }
@@ -1876,55 +1816,193 @@ mod hislip {
             assert!(resp.contains("TestCo"), "{}", resp);
         }
 
-        // -- Credit tracking -------------------------------------------
+        // -- init_response encode / decode -----------------------------
 
         #[test]
-        fn init_response_grants_credits() {
+        fn init_response_encodes_session_id() {
+            let msg = init_response(0x00AB);
+            // session_id should be in the lower 16 bits of message_parameter
+            let extracted = (msg.message_parameter & 0xFFFF) as u16;
+            assert_eq!(extracted, 0x00AB);
+        }
+
+        #[test]
+        fn init_response_encodes_protocol_version() {
             let msg = init_response(0);
-            assert_eq!(
-                msg.control_code, INITIAL_CREDITS,
-                "InitializeResponse must carry initial credits in control_code"
-            );
+            // Upper 16 bits: server protocol version (major << 8 | minor)
+            let version_word = (msg.message_parameter >> 16) as u16;
+            let major = (version_word >> 8) as u8;
+            let minor = (version_word & 0xFF) as u8;
+            assert_eq!(major, PROTOCOL_VERSION_MAJOR);
+            assert_eq!(minor, PROTOCOL_VERSION_MINOR as u8);
         }
 
         #[test]
-        fn client_credits_after_connect() {
-            let port = start_sequential(test_device());
-            let client =
-                HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
-            assert!(
-                client.credits() >= 1,
-                "client should have at least 1 credit after connecting"
-            );
+        fn init_response_session_id_round_trip() {
+            // Verify encode → wire → decode produces the same session_id
+            for &sid in &[0u16, 1, 0x00FF, 0x1234, 0xFFFF] {
+                let msg = init_response(sid);
+                let encoded = msg.encode();
+                let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+                let extracted = (decoded.message_parameter & 0xFFFF) as u16;
+                assert_eq!(
+                    extracted, sid,
+                    "session_id round-trip failed for {:#06x}",
+                    sid
+                );
+            }
         }
 
         #[test]
-        fn credits_restored_after_query() {
-            let port = start_sequential(test_device());
-            let mut client =
-                HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
-            let before = client.credits();
-            client.query("*IDN?").unwrap();
-            assert_eq!(
-                client.credits(),
-                before,
-                "credits should be restored after a completed query"
-            );
+        fn init_response_preserves_version_across_session_ids() {
+            // Protocol version must remain intact regardless of session_id
+            for &sid in &[0u16, 1, 0x7FFF, 0xFFFF] {
+                let msg = init_response(sid);
+                let encoded = msg.encode();
+                let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+                let version_word = (decoded.message_parameter >> 16) as u16;
+                let major = (version_word >> 8) as u8;
+                let minor = (version_word & 0xFF) as u8;
+                assert_eq!(
+                    major, PROTOCOL_VERSION_MAJOR,
+                    "major version wrong for session_id {:#06x}",
+                    sid
+                );
+                assert_eq!(
+                    minor, PROTOCOL_VERSION_MINOR as u8,
+                    "minor version wrong for session_id {:#06x}",
+                    sid
+                );
+            }
         }
 
         #[test]
-        fn credits_restored_after_send() {
-            let port = start_sequential(test_device());
-            let mut client =
-                HislipClient::connect(format!("127.0.0.1:{}", port)).unwrap();
-            let before = client.credits();
-            client.send("*RST").unwrap();
-            assert_eq!(
-                client.credits(),
-                before,
-                "credits should be restored after a completed send"
-            );
+        fn init_response_control_code_is_zero() {
+            let msg = init_response(42);
+            assert_eq!(msg.control_code, 0, "control_code should be 0 (no overlap)");
         }
+
+        #[test]
+        fn init_response_message_type() {
+            let msg = init_response(0);
+            assert_eq!(msg.msg_type, MessageType::InitializeResponse);
+        }
+
+        // -- Initialize message encode / decode ------------------------
+
+        #[test]
+        fn initialize_message_encodes_version_and_sub_address() {
+            // Mirrors what the client builds in connect_with_sub_address
+            let sub_address = "hislip0";
+            let client_version =
+                ((PROTOCOL_VERSION_MAJOR as u32) << 8) | (PROTOCOL_VERSION_MINOR as u32);
+            let version_param = client_version << 16; // vendor ID = 0
+            let msg = Message::new(
+                MessageType::Initialize,
+                0,
+                version_param,
+                sub_address.as_bytes().to_vec(),
+            );
+
+            let encoded = msg.encode();
+            let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+            assert_eq!(decoded.msg_type, MessageType::Initialize);
+            assert_eq!(decoded.control_code, 0);
+            // In the Initialize message, version is packed into the
+            // upper 16 bits of message_parameter (vendor ID = 0 in lower 16).
+            let decoded_version = (decoded.message_parameter >> 16) as u16;
+            let major = (decoded_version >> 8) as u8;
+            let minor = (decoded_version & 0xFF) as u8;
+            assert_eq!(major, PROTOCOL_VERSION_MAJOR);
+            assert_eq!(minor, PROTOCOL_VERSION_MINOR as u8);
+            assert_eq!(decoded.payload, sub_address.as_bytes());
+        }
+
+        // -- AsyncInitialize session_id encoding -----------------------
+
+        #[test]
+        fn async_initialize_encodes_session_id() {
+            // Session ID is in the lower word of message_parameter.
+            for &sid in &[0u16, 1, 0x00FF, 0x1234, 0xFFFF] {
+                let msg = Message::new(
+                    MessageType::AsyncInitialize,
+                    0,
+                    sid as u32,
+                    Vec::new(),
+                );
+
+                let encoded = msg.encode();
+                let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+                let extracted = (decoded.message_parameter & 0xFFFF) as u16;
+                assert_eq!(
+                    extracted, sid,
+                    "AsyncInitialize session_id round-trip failed for {:#06x}",
+                    sid
+                );
+            }
+        }
+
+        // -- General Message encode / decode ---------------------------
+
+        #[test]
+        fn message_round_trip_all_fields() {
+            // Exercise non-zero control_code and large message_parameter
+            let original = Message::new(
+                MessageType::InitializeResponse,
+                0xAB,
+                0xDEAD_BEEF,
+                b"hello world".to_vec(),
+            );
+            let encoded = original.encode();
+            let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+            assert_eq!(decoded.msg_type, MessageType::InitializeResponse);
+            assert_eq!(decoded.control_code, 0xAB);
+            assert_eq!(decoded.message_parameter, 0xDEAD_BEEF);
+            assert_eq!(decoded.payload, b"hello world");
+        }
+
+        #[test]
+        fn message_parameter_bytes_are_big_endian() {
+            let msg = Message::new(
+                MessageType::Data,
+                0,
+                0x01020304,
+                Vec::new(),
+            );
+            let encoded = msg.encode();
+            // message_parameter is at bytes [4..8] of the header
+            assert_eq!(&encoded[4..8], &[0x01, 0x02, 0x03, 0x04]);
+        }
+
+        #[test]
+        fn payload_length_field_matches_payload() {
+            let payload = vec![0xAAu8; 300];
+            let msg = Message::new(MessageType::Data, 0, 0, payload.clone());
+            let encoded = msg.encode();
+
+            // payload_length is at bytes [8..16] as u64 big-endian
+            let len_bytes: [u8; 8] = encoded[8..16].try_into().unwrap();
+            let payload_len = u64::from_be_bytes(len_bytes);
+            assert_eq!(payload_len, 300);
+            assert_eq!(&encoded[16..], &payload[..]);
+        }
+
+        #[test]
+        fn decode_rejects_unknown_message_type() {
+            let mut buf = vec![b'H', b'S'];
+            buf.push(200); // invalid message type
+            buf.push(0);   // control_code
+            buf.extend_from_slice(&0u32.to_be_bytes()); // message_parameter
+            buf.extend_from_slice(&0u64.to_be_bytes()); // payload_length
+            let result = Message::decode(&mut &buf[..]);
+            assert!(result.is_err());
+        }
+
     }
 }
 
