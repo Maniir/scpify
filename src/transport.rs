@@ -1314,16 +1314,11 @@ mod hislip {
 
         /// Send a SCPI command that produces **no response** (e.g. `*RST`).
         ///
-        /// The command is wrapped in a HiSLIP `DataEnd` message.  The server
-        /// responds with a `DataEnd` acknowledgement which is read and
-        /// discarded automatically.
+        /// The command is wrapped in a HiSLIP `DataEnd` message.  Per the
+        /// IVI-6.1 spec, non-query commands do not elicit a response from
+        /// the server, so this method returns immediately after sending.
         pub fn send(&mut self, command: &str) -> io::Result<()> {
-            self.send_data_end(command.as_bytes().to_vec())?;
-
-            // HiSLIP is request-response: consume the server's reply so
-            // it does not interfere with the next query().
-            let _resp = self.read_response()?;
-            Ok(())
+            self.send_data_end(command.as_bytes().to_vec())
         }
 
         /// Send a query command and return the instrument's response as a
@@ -1510,26 +1505,28 @@ mod hislip {
                     let command = String::from_utf8_lossy(&accumulated);
                     let command = command.trim();
 
-                    let response_text = if command.is_empty() {
-                        String::new()
-                    } else {
+                    if !command.is_empty() {
                         let responses = dispatch(command);
-                        responses
+                        let response_text: String = responses
                             .iter()
                             .filter(|r| **r != Response::Empty)
                             .map(|r| r.to_string())
                             .collect::<Vec<_>>()
-                            .join("\n")
-                    };
+                            .join("\n");
 
-                    // Server response uses (client_msg_id | 1).
-                    let resp_msg = Message::new(
-                        MessageType::DataEnd,
-                        0,
-                        msg.message_parameter | 1,
-                        response_text.into_bytes(),
-                    );
-                    stream.write_all(&resp_msg.encode())?;
+                        // Only send a response if the command produced
+                        // output (i.e. it was a query).  Non-query commands
+                        // do not generate a HiSLIP reply per IVI-6.1.
+                        if !response_text.is_empty() {
+                            let resp_msg = Message::new(
+                                MessageType::DataEnd,
+                                0,
+                                msg.message_parameter | 1,
+                                response_text.into_bytes(),
+                            );
+                            stream.write_all(&resp_msg.encode())?;
+                        }
+                    }
 
                     accumulated.clear();
                 }
