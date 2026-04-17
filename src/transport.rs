@@ -1256,7 +1256,8 @@ mod hislip {
                 ));
             }
 
-            let session_id = (init_resp.message_parameter >> 16) as u16;
+            // Session ID is in the lower word of message_parameter (IVI-6.1 §3.1).
+            let session_id = (init_resp.message_parameter & 0xFFFF) as u16;
 
             // -- 2. Open asynchronous channel and perform AsyncInitialize --
             let mut async_stream = TcpStream::connect(addr)?;
@@ -1424,10 +1425,14 @@ mod hislip {
     // -------------------------------------------------------------------
 
     /// Build an `InitializeResponse` message for the given session ID.
+    ///
+    /// `message_parameter` layout (IVI-6.1 §3.1):
+    ///   - upper word (bits 31-16): server protocol version
+    ///   - lower word (bits 15-0): session ID
     fn init_response(session_id: u16) -> Message {
-        let response_param = ((session_id as u32) << 16)
-            | ((PROTOCOL_VERSION_MAJOR as u32) << 8)
-            | (PROTOCOL_VERSION_MINOR as u32);
+        let server_version =
+            ((PROTOCOL_VERSION_MAJOR as u32) << 8) | (PROTOCOL_VERSION_MINOR as u32);
+        let response_param = (server_version << 16) | (session_id as u32);
         Message::new(
             MessageType::InitializeResponse,
             0, // control_code: no overlap (IVI-6.1 §3.1)
@@ -1837,17 +1842,18 @@ mod hislip {
         #[test]
         fn init_response_encodes_session_id() {
             let msg = init_response(0x00AB);
-            // session_id should be in the upper 16 bits of message_parameter
-            let extracted = (msg.message_parameter >> 16) as u16;
+            // session_id should be in the lower 16 bits of message_parameter
+            let extracted = (msg.message_parameter & 0xFFFF) as u16;
             assert_eq!(extracted, 0x00AB);
         }
 
         #[test]
         fn init_response_encodes_protocol_version() {
             let msg = init_response(0);
-            // Lower 16 bits: major in bits [8..16), minor in bits [0..8)
-            let major = ((msg.message_parameter >> 8) & 0xFF) as u8;
-            let minor = (msg.message_parameter & 0xFF) as u8;
+            // Upper 16 bits: server protocol version (major << 8 | minor)
+            let version_word = (msg.message_parameter >> 16) as u16;
+            let major = (version_word >> 8) as u8;
+            let minor = (version_word & 0xFF) as u8;
             assert_eq!(major, PROTOCOL_VERSION_MAJOR);
             assert_eq!(minor, PROTOCOL_VERSION_MINOR as u8);
         }
@@ -1860,7 +1866,7 @@ mod hislip {
                 let encoded = msg.encode();
                 let decoded = Message::decode(&mut &encoded[..]).unwrap();
 
-                let extracted = (decoded.message_parameter >> 16) as u16;
+                let extracted = (decoded.message_parameter & 0xFFFF) as u16;
                 assert_eq!(
                     extracted, sid,
                     "session_id round-trip failed for {:#06x}",
@@ -1877,15 +1883,16 @@ mod hislip {
                 let encoded = msg.encode();
                 let decoded = Message::decode(&mut &encoded[..]).unwrap();
 
-                let major = ((decoded.message_parameter >> 8) & 0xFF) as u8;
-                let minor = (decoded.message_parameter & 0xFF) as u16;
+                let version_word = (decoded.message_parameter >> 16) as u16;
+                let major = (version_word >> 8) as u8;
+                let minor = (version_word & 0xFF) as u8;
                 assert_eq!(
                     major, PROTOCOL_VERSION_MAJOR,
                     "major version wrong for session_id {:#06x}",
                     sid
                 );
                 assert_eq!(
-                    minor, PROTOCOL_VERSION_MINOR as u16,
+                    minor, PROTOCOL_VERSION_MINOR as u8,
                     "minor version wrong for session_id {:#06x}",
                     sid
                 );
