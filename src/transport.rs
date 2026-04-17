@@ -1266,7 +1266,7 @@ mod hislip {
             let async_init = Message::new(
                 MessageType::AsyncInitialize,
                 0,
-                (session_id as u32) << 16,
+                session_id as u32,
                 Vec::new(),
             );
             async_stream.write_all(&async_init.encode())?;
@@ -1278,26 +1278,6 @@ mod hislip {
                     format!(
                         "expected AsyncInitializeResponse, got {:?}",
                         async_resp.msg_type
-                    ),
-                ));
-            }
-
-            // -- 3. Negotiate maximum message size (AsyncMaximumMessageSize) --
-            let max_msg = Message::new(
-                MessageType::AsyncMaximumMessageSize,
-                0,
-                0,
-                MAX_PAYLOAD_SIZE.to_be_bytes().to_vec(),
-            );
-            async_stream.write_all(&max_msg.encode())?;
-
-            let max_resp = Message::decode(&mut async_stream)?;
-            if max_resp.msg_type != MessageType::AsyncMaximumMessageSizeResponse {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "expected AsyncMaximumMessageSizeResponse, got {:?}",
-                        max_resp.msg_type
                     ),
                 ));
             }
