@@ -853,10 +853,16 @@ mod hislip {
     /// sets `control_code` to 0 (backward-compatible synchronized mode).
     const DEFAULT_FALLBACK_CREDITS: u32 = 1;
 
-    /// Timeout applied when waiting for an optional
-    /// `AsyncMaximumMessageSize` message from the client after the async
-    /// channel has been initialized.
-    const ASYNC_MAX_MSG_SIZE_TIMEOUT: Duration = Duration::from_millis(200);
+    /// Timeout applied when waiting for the `AsyncMaximumMessageSize`
+    /// message from the client after the async channel has been initialized
+    /// (IVI-6.1 §3.1.3).
+    ///
+    /// Matched to `DEFAULT_HISLIP_READ_TIMEOUT` so that clients on
+    /// high-latency links (where 200 ms was too tight) reliably complete
+    /// the exchange before the server gives up, rather than receiving a
+    /// spurious TCP `[RST, ACK]` when their message arrives on a
+    /// connection that has already been torn down.
+    const ASYNC_MAX_MSG_SIZE_TIMEOUT: Duration = DEFAULT_HISLIP_READ_TIMEOUT;
 
     /// Initial MessageID value used by the client (IVI-6.1 §6.3).
     const INITIAL_MESSAGE_ID: u32 = 0xFFFF_FF00;
@@ -1157,14 +1163,27 @@ mod hislip {
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
 
-                                handle_async_max_msg_size(&mut s);
-
                                 if let Some(sync_stream) =
                                     pending.lock().unwrap().remove(&session_id)
                                 {
                                     let dev = Arc::clone(&shared);
                                     std::thread::spawn(move || {
-                                        let _ = serve_hislip_client_shared(sync_stream, dev);
+                                        // `handle_async_max_msg_size` runs
+                                        // inside the session thread so that
+                                        // the accept loop is never blocked by
+                                        // its timeout, and `s` is kept alive
+                                        // for the full session lifetime so
+                                        // that the async channel remains open
+                                        // (prevents TCP [RST, ACK] from being
+                                        // sent when the client's
+                                        // AsyncMaximumMessageSize message
+                                        // arrives while the server is waiting
+                                        // for SCPI commands on the sync
+                                        // channel).
+                                        let mut async_s = s;
+                                        handle_async_max_msg_size(&mut async_s);
+                                        let _ =
+                                            serve_hislip_client_shared(sync_stream, dev);
                                     });
                                 }
                             }
@@ -1924,6 +1943,106 @@ mod hislip {
                 before,
                 "credits should be restored after a completed send"
             );
+        }
+
+        /// Regression test for the RST-on-AsyncMaximumMessageSize bug.
+        ///
+        /// A slow client that delays sending `AsyncMaximumMessageSize` (past
+        /// the old 200 ms window) should still receive
+        /// `AsyncMaximumMessageSizeResponse` and be able to complete SCPI
+        /// queries on both server flavours.  Before the fix, the server
+        /// would tear down the async channel after the old 200 ms timeout
+        /// and the client's delayed message would arrive on a closed
+        /// connection, triggering a TCP `[RST, ACK]`.
+        #[test]
+        fn async_max_msg_size_delayed_sequential() {
+            let port = start_sequential(test_device());
+            let result = slow_async_init_client(port);
+            assert!(result.is_ok(), "delayed AsyncMaximumMessageSize failed: {:?}", result);
+        }
+
+        #[test]
+        fn async_max_msg_size_delayed_concurrent() {
+            let port = start_concurrent(test_device());
+            let result = slow_async_init_client(port);
+            assert!(result.is_ok(), "delayed AsyncMaximumMessageSize failed: {:?}", result);
+        }
+
+        /// Perform the full HiSLIP handshake manually, introducing a
+        /// deliberate pause before sending `AsyncMaximumMessageSize` to
+        /// reproduce the timing window that previously caused a TCP RST.
+        fn slow_async_init_client(port: u16) -> io::Result<String> {
+            let addr = format!("127.0.0.1:{}", port);
+
+            // -- Sync channel --
+            let mut sync = TcpStream::connect(&addr as &str)?;
+            sync.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            let init = Message::new(
+                MessageType::Initialize,
+                PROTOCOL_VERSION_MAJOR,
+                0,
+                b"hislip0".to_vec(),
+            );
+            sync.write_all(&init.encode())?;
+
+            let init_resp = Message::decode(&mut sync)?;
+            assert_eq!(init_resp.msg_type, MessageType::InitializeResponse);
+            let session_id = (init_resp.message_parameter >> 16) as u16;
+
+            // -- Async channel --
+            let mut async_s = TcpStream::connect(&addr as &str)?;
+            async_s.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            let async_init = Message::new(
+                MessageType::AsyncInitialize,
+                0,
+                (session_id as u32) << 16,
+                Vec::new(),
+            );
+            async_s.write_all(&async_init.encode())?;
+
+            let async_resp = Message::decode(&mut async_s)?;
+            assert_eq!(async_resp.msg_type, MessageType::AsyncInitializeResponse);
+
+            // Simulate a slow client: wait longer than the old 200 ms
+            // timeout before sending AsyncMaximumMessageSize.
+            std::thread::sleep(Duration::from_millis(300));
+
+            let max_msg = Message::new(
+                MessageType::AsyncMaximumMessageSize,
+                0,
+                0,
+                MAX_PAYLOAD_SIZE.to_be_bytes().to_vec(),
+            );
+            async_s.write_all(&max_msg.encode())?;
+
+            // Must receive AsyncMaximumMessageSizeResponse (no RST).
+            let max_resp = Message::decode(&mut async_s)?;
+            assert_eq!(max_resp.msg_type, MessageType::AsyncMaximumMessageSizeResponse);
+
+            // Issue a SCPI query to confirm the session is fully operational.
+            let credits = if init_resp.control_code > 0 {
+                init_resp.control_code as u32
+            } else {
+                DEFAULT_FALLBACK_CREDITS
+            };
+            assert!(credits >= 1, "no credits granted");
+
+            let msg_id = INITIAL_MESSAGE_ID;
+            let data_end = Message::new(
+                MessageType::DataEnd,
+                0,
+                msg_id,
+                b"*IDN?".to_vec(),
+            );
+            sync.write_all(&data_end.encode())?;
+
+            let resp = Message::decode(&mut sync)?;
+            assert_eq!(resp.msg_type, MessageType::DataEnd);
+            let text = String::from_utf8(resp.payload)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(text.trim().to_string())
         }
     }
 }
