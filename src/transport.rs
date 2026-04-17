@@ -1089,7 +1089,7 @@ mod hislip {
                                 pending.insert(session_id, s);
                             }
                             MessageType::AsyncInitialize => {
-                                let session_id = (msg.message_parameter >> 16) as u16;
+                                let session_id = (msg.message_parameter & 0xFFFF) as u16;
 
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
@@ -1144,7 +1144,7 @@ mod hislip {
                                 pending.lock().unwrap().insert(session_id, s);
                             }
                             MessageType::AsyncInitialize => {
-                                let session_id = (msg.message_parameter >> 16) as u16;
+                                let session_id = (msg.message_parameter & 0xFFFF) as u16;
 
                                 let response = async_init_response();
                                 let _ = s.write_all(&response.encode());
@@ -1266,7 +1266,7 @@ mod hislip {
             let async_init = Message::new(
                 MessageType::AsyncInitialize,
                 0,
-                session_id as u32,
+                session_id as u32, // session_id in lower word of message_parameter
                 Vec::new(),
             );
             async_stream.write_all(&async_init.encode())?;
@@ -1921,18 +1921,19 @@ mod hislip {
 
         #[test]
         fn async_initialize_encodes_session_id() {
+            // Session ID is in the lower word of message_parameter.
             for &sid in &[0u16, 1, 0x00FF, 0x1234, 0xFFFF] {
                 let msg = Message::new(
                     MessageType::AsyncInitialize,
                     0,
-                    (sid as u32) << 16,
+                    sid as u32,
                     Vec::new(),
                 );
 
                 let encoded = msg.encode();
                 let decoded = Message::decode(&mut &encoded[..]).unwrap();
 
-                let extracted = (decoded.message_parameter >> 16) as u16;
+                let extracted = (decoded.message_parameter & 0xFFFF) as u16;
                 assert_eq!(
                     extracted, sid,
                     "AsyncInitialize session_id round-trip failed for {:#06x}",
