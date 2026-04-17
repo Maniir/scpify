@@ -1832,6 +1832,185 @@ mod hislip {
             assert!(resp.contains("TestCo"), "{}", resp);
         }
 
+        // -- init_response encode / decode -----------------------------
+
+        #[test]
+        fn init_response_encodes_session_id() {
+            let msg = init_response(0x00AB);
+            // session_id should be in the upper 16 bits of message_parameter
+            let extracted = (msg.message_parameter >> 16) as u16;
+            assert_eq!(extracted, 0x00AB);
+        }
+
+        #[test]
+        fn init_response_encodes_protocol_version() {
+            let msg = init_response(0);
+            // Lower 16 bits: major in bits [8..16), minor in bits [0..8)
+            let major = ((msg.message_parameter >> 8) & 0xFF) as u8;
+            let minor = (msg.message_parameter & 0xFF) as u8;
+            assert_eq!(major, PROTOCOL_VERSION_MAJOR);
+            assert_eq!(minor, PROTOCOL_VERSION_MINOR as u8);
+        }
+
+        #[test]
+        fn init_response_session_id_round_trip() {
+            // Verify encode → wire → decode produces the same session_id
+            for &sid in &[0u16, 1, 0x00FF, 0x1234, 0xFFFF] {
+                let msg = init_response(sid);
+                let encoded = msg.encode();
+                let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+                let extracted = (decoded.message_parameter >> 16) as u16;
+                assert_eq!(
+                    extracted, sid,
+                    "session_id round-trip failed for {:#06x}",
+                    sid
+                );
+            }
+        }
+
+        #[test]
+        fn init_response_preserves_version_across_session_ids() {
+            // Protocol version must remain intact regardless of session_id
+            for &sid in &[0u16, 1, 0x7FFF, 0xFFFF] {
+                let msg = init_response(sid);
+                let encoded = msg.encode();
+                let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+                let major = ((decoded.message_parameter >> 8) & 0xFF) as u8;
+                let minor = (decoded.message_parameter & 0xFF) as u16;
+                assert_eq!(
+                    major, PROTOCOL_VERSION_MAJOR,
+                    "major version wrong for session_id {:#06x}",
+                    sid
+                );
+                assert_eq!(
+                    minor, PROTOCOL_VERSION_MINOR as u16,
+                    "minor version wrong for session_id {:#06x}",
+                    sid
+                );
+            }
+        }
+
+        #[test]
+        fn init_response_control_code_is_zero() {
+            let msg = init_response(42);
+            assert_eq!(msg.control_code, 0, "control_code should be 0 (no overlap)");
+        }
+
+        #[test]
+        fn init_response_message_type() {
+            let msg = init_response(0);
+            assert_eq!(msg.msg_type, MessageType::InitializeResponse);
+        }
+
+        // -- Initialize message encode / decode ------------------------
+
+        #[test]
+        fn initialize_message_encodes_version_and_sub_address() {
+            // Mirrors what the client builds in connect_with_sub_address
+            let sub_address = "hislip0";
+            let version_param = (PROTOCOL_VERSION_MINOR as u32) << 16;
+            let msg = Message::new(
+                MessageType::Initialize,
+                PROTOCOL_VERSION_MAJOR,
+                version_param,
+                sub_address.as_bytes().to_vec(),
+            );
+
+            let encoded = msg.encode();
+            let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+            assert_eq!(decoded.msg_type, MessageType::Initialize);
+            assert_eq!(decoded.control_code, PROTOCOL_VERSION_MAJOR);
+            // In the Initialize message, minor version is packed into the
+            // upper 16 bits of message_parameter (vendor ID = 0 in lower 16).
+            let decoded_minor = (decoded.message_parameter >> 16) as u16;
+            assert_eq!(decoded_minor, PROTOCOL_VERSION_MINOR);
+            assert_eq!(decoded.payload, sub_address.as_bytes());
+        }
+
+        // -- AsyncInitialize session_id encoding -----------------------
+
+        #[test]
+        fn async_initialize_encodes_session_id() {
+            for &sid in &[0u16, 1, 0x00FF, 0x1234, 0xFFFF] {
+                let msg = Message::new(
+                    MessageType::AsyncInitialize,
+                    0,
+                    (sid as u32) << 16,
+                    Vec::new(),
+                );
+
+                let encoded = msg.encode();
+                let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+                let extracted = (decoded.message_parameter >> 16) as u16;
+                assert_eq!(
+                    extracted, sid,
+                    "AsyncInitialize session_id round-trip failed for {:#06x}",
+                    sid
+                );
+            }
+        }
+
+        // -- General Message encode / decode ---------------------------
+
+        #[test]
+        fn message_round_trip_all_fields() {
+            // Exercise non-zero control_code and large message_parameter
+            let original = Message::new(
+                MessageType::InitializeResponse,
+                0xAB,
+                0xDEAD_BEEF,
+                b"hello world".to_vec(),
+            );
+            let encoded = original.encode();
+            let decoded = Message::decode(&mut &encoded[..]).unwrap();
+
+            assert_eq!(decoded.msg_type, MessageType::InitializeResponse);
+            assert_eq!(decoded.control_code, 0xAB);
+            assert_eq!(decoded.message_parameter, 0xDEAD_BEEF);
+            assert_eq!(decoded.payload, b"hello world");
+        }
+
+        #[test]
+        fn message_parameter_bytes_are_big_endian() {
+            let msg = Message::new(
+                MessageType::Data,
+                0,
+                0x01020304,
+                Vec::new(),
+            );
+            let encoded = msg.encode();
+            // message_parameter is at bytes [4..8] of the header
+            assert_eq!(&encoded[4..8], &[0x01, 0x02, 0x03, 0x04]);
+        }
+
+        #[test]
+        fn payload_length_field_matches_payload() {
+            let payload = vec![0xAAu8; 300];
+            let msg = Message::new(MessageType::Data, 0, 0, payload.clone());
+            let encoded = msg.encode();
+
+            // payload_length is at bytes [8..16] as u64 big-endian
+            let len_bytes: [u8; 8] = encoded[8..16].try_into().unwrap();
+            let payload_len = u64::from_be_bytes(len_bytes);
+            assert_eq!(payload_len, 300);
+            assert_eq!(&encoded[16..], &payload[..]);
+        }
+
+        #[test]
+        fn decode_rejects_unknown_message_type() {
+            let mut buf = vec![b'H', b'S'];
+            buf.push(200); // invalid message type
+            buf.push(0);   // control_code
+            buf.extend_from_slice(&0u32.to_be_bytes()); // message_parameter
+            buf.extend_from_slice(&0u64.to_be_bytes()); // payload_length
+            let result = Message::decode(&mut &buf[..]);
+            assert!(result.is_err());
+        }
+
     }
 }
 
