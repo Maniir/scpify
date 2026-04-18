@@ -8,17 +8,17 @@ Use it to **control instruments from a PC** (connect to a scope, DMM, or power s
 
 ## Features
 
-| Feature                                   | Description                                                                                                |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **`TcpClient`** *(feature `tcp`)*         | Connect from a PC to any SCPI instrument over TCP; send commands and read responses                        |
-| **`TcpServer`** *(feature `tcp`)*         | Host a SCPI server so other programs can control your device over TCP                                      |
-| **`HislipClient`** *(feature `hislip`)*   | Connect from a PC to any SCPI instrument over HiSLIP (IVI-6.1); send commands and read responses           |
-| **`HislipServer`** *(feature `hislip`)*   | Host a HiSLIP server so other programs can control your device using the HiSLIP protocol                   |
-| **Message parser**                        | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
-| **Mnemonic matching**                     | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively                            |
-| **Response types**                        | Strongly-typed `Response` values formatted to the SCPI standard                                            |
-| **IEEE 488.2 built-ins**                  | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI`                |
-| **Error queue**                           | SCPI-standard FIFO error queue with standard error codes                                                   |
+| Feature                                 | Description                                                                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **`TcpClient`** *(feature `tcp`)*       | Connect from a PC to any SCPI instrument over TCP; send commands and read responses                        |
+| **`TcpServer`** *(feature `tcp`)*       | Host a SCPI server so other programs can control your device over TCP                                      |
+| **`HislipClient`** *(feature `hislip`)* | Connect from a PC to any SCPI instrument over HiSLIP (IVI-6.1); send commands and read responses           |
+| **`HislipServer`** *(feature `hislip`)* | Host a HiSLIP server so other programs can control your device using the HiSLIP protocol                   |
+| **Message parser**                      | Tokenise and parse SCPI strings into typed `Command` structs, including compound messages (`"*RST;*IDN?"`) |
+| **Mnemonic matching**                   | Both short form (`MEAS`) and long form (`MEASure`) accepted, case-insensitively                            |
+| **Response types**                      | Strongly-typed `Response` values formatted to the SCPI standard                                            |
+| **IEEE 488.2 built-ins**                | `*IDN?`, `*RST`, `*CLS`, `*ESE[?]`, `*ESR?`, `*OPC[?]`, `*SRE[?]`, `*STB?`, `*TST?`, `*WAI`                |
+| **Error queue**                         | SCPI-standard FIFO error queue with standard error codes                                                   |
 
 ---
 
@@ -29,26 +29,26 @@ Add `scpify` to your `Cargo.toml` with the transport feature(s) you need:
 ```toml
 # TCP transport (SCPI-RAW, port 5025) — enabled by default
 [dependencies]
-scpify = { version = "0.1", features = ["tcp"] }
+scpify = { version = "0.2.0", features = ["tcp"] }
 ```
 
 ```toml
 # HiSLIP transport (IVI-6.1, port 4880)
 [dependencies]
-scpify = { version = "0.1", features = ["hislip"] }
+scpify = { version = "0.2.0", features = ["hislip"] }
 ```
 
 ```toml
 # Both transports
 [dependencies]
-scpify = { version = "0.1", features = ["tcp", "hislip"] }
+scpify = { version = "0.2.0", features = ["tcp", "hislip"] }
 ```
 
 If you only need the message parser and don't need network I/O (e.g. for an embedded device), omit the feature:
 
 ```toml
 [dependencies]
-scpify = "0.1"
+scpify = "0.2.0"
 ```
 
 ---
