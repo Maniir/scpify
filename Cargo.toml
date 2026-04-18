@@ -2,10 +2,10 @@
 name = "scpify"
 version = "0.2.0"
 edition = "2021"
-description = "Rust library for sending and receiving SCPI (Standard Commands for Programmable Instruments) protocol"
+description = "Rust library for sending and receiving SCPI (Standard Commands for Programmable Instruments) messages over TCP and HiSLIP (IVI-6.1)"
 license = "MIT"
 repository = "https://github.com/Maniir/scpify"
-keywords = ["scpi", "instrument", "measurement", "ieee488", "test"]
+keywords = ["scpi", "instrument", "measurement", "ieee488", "hislip"]
 categories = ["embedded", "hardware-support", "parser-implementations"]
 readme = "README.md"
 
