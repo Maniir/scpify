@@ -70,7 +70,7 @@ pub use parser::parse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{COMMAND_ERROR, UNDEFINED_HEADER};
-use ieee488::handle_common_command;
+use ieee488::{handle_common_command, handle_system_command};
 
 // ---------------------------------------------------------------------------
 // Handler type alias
@@ -175,14 +175,24 @@ impl Device {
             }
         }
 
-        // 2. Try user-registered handlers.
+        // 2. Try IEEE 488.2 system commands.
+        match handle_system_command(cmd, &mut self.error_queue) {
+            Ok(response) => return response,
+            Err(ref e) if *e == UNDEFINED_HEADER => {} // not a system command
+            Err(e) => {
+                self.error_queue.push(e);
+                return Response::Empty;
+            }
+        }
+
+        // 3. Try user-registered handlers.
         for handler in &self.handlers {
             if let Some(response) = handler(cmd) {
                 return response;
             }
         }
 
-        // 3. No handler matched — push command error.
+        // 4. No handler matched — push command error.
         self.error_queue.push(COMMAND_ERROR);
         Response::Empty
     }

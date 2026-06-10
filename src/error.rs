@@ -202,6 +202,11 @@ impl ErrorQueue {
     pub fn clear(&mut self) {
         self.errors.clear();
     }
+
+    /// Return all errors joined, or [`NO_ERROR`] if empty.
+    pub fn join(&mut self) -> String {
+        self.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(",")
+    }
 }
 
 #[cfg(test)]

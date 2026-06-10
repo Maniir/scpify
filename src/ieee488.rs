@@ -23,8 +23,11 @@
 //! | `*WAI`   | Wait-to-continue                    |
 
 use crate::command::{Command, Response};
-use crate::error::{ErrorQueue, ScpiError, MISSING_PARAMETER, UNDEFINED_HEADER};
+use crate::error::{ErrorQueue, ScpiError, MISSING_PARAMETER, NO_ERROR, UNDEFINED_HEADER, UNEXPECTED_NUMBER_OF_PARAMETERS};
 use serde::{Deserialize, Serialize};
+
+/// SCPI implementation version.
+pub const SCPI_IMPLEMENTATION_VERSION: &str = "1999.0";
 
 /// Identification fields embedded in the instrument.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +230,48 @@ pub fn handle_common_command(
 
         _ => Err(UNDEFINED_HEADER),
     }
+}
+
+/// Dispatch a single IEEE 488.2 system command.
+///
+/// Returns `Ok(Response)` on success, or `Err(UNDEFINED_HEADER)` when the
+/// command is not a system command (so the caller can try device-specific
+/// handlers).
+pub fn handle_system_command(
+    cmd: &Command,
+    error_queue: &mut ErrorQueue,
+) -> Result<Response, ScpiError> {
+    if cmd.matches_header("SYSTem:ERRor:CLEar") && !cmd.is_query {
+        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        error_queue.clear();
+        return Ok(Response::Empty);
+    }
+
+    if cmd.matches_header("SYSTem:ERRor:COUNt") && cmd.is_query {
+        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        return Ok(Response::Integer(error_queue.len() as i64));
+    }
+
+    if cmd.matches_header("SYSTem:ERRor:ALL") && cmd.is_query {
+        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        if error_queue.is_empty() { return Ok(Response::Str(NO_ERROR.to_string())); }
+        return Ok(Response::Str(error_queue.join()));
+    }
+
+    if (cmd.matches_header("SYSTem:ERRor:QUEue")
+            || cmd.matches_header("SYSTem:ERRor:NEXt")
+            || cmd.matches_header("SYSTem:ERRor")
+            ) && cmd.is_query {
+        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        return Ok(Response::Str(error_queue.pop().to_string()));
+    }
+
+    if cmd.matches_header("SYSTem:VERSION") && cmd.is_query {
+        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        return Ok(Response::Str(SCPI_IMPLEMENTATION_VERSION.to_string()));
+    }
+
+    Err(UNDEFINED_HEADER)
 }
 
 #[cfg(test)]
