@@ -243,10 +243,29 @@ mod tests {
     }
 
     #[test]
+    fn response_display_character() {
+        assert_eq!(Response::Character("meas".into()).to_string(), "MEAS");
+    }
+
+    #[test]
     fn param_as_bool() {
         assert_eq!(Param::Character("ON".into()).as_bool(), Some(true));
         assert_eq!(Param::Character("OFF".into()).as_bool(), Some(false));
         assert_eq!(Param::Integer(0).as_bool(), Some(false));
         assert_eq!(Param::Integer(1).as_bool(), Some(true));
+    }
+
+    #[test]
+    fn param_conversions_cover_common_cases() {
+        assert_eq!(Param::Integer(42).as_integer(), Some(42));
+        assert_eq!(Param::Float(12.75).as_integer(), Some(12));
+        assert_eq!(Param::Character("-7".into()).as_integer(), Some(-7));
+
+        assert_eq!(Param::Float(3.5).as_float(), Some(3.5));
+        assert_eq!(Param::Integer(8).as_float(), Some(8.0));
+        assert_eq!(Param::Character("2.5".into()).as_float(), Some(2.5));
+
+        assert_eq!(Param::Str("scope".into()).as_str(), Some("scope"));
+        assert_eq!(Param::Character("label".into()).as_str(), Some("label"));
     }
 }

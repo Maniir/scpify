@@ -8,7 +8,7 @@
 //! separators.
 
 use crate::command::{Command, Param};
-use crate::token::{Token, tokenize};
+use crate::token::{tokenize, Token};
 
 /// Parse a raw SCPI message string into a `Vec<Command>`.
 ///
@@ -158,6 +158,14 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert!(!cmds[0].is_query);
         assert_eq!(cmds[0].params, vec![Param::Bool(true)]);
+    }
+
+    #[test]
+    fn parse_numeric_bool_shorthand() {
+        let cmds = parse(":OUTPut:STATe 1;:OUTPut:STATe 0");
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].params, vec![Param::Bool(true)]);
+        assert_eq!(cmds[1].params, vec![Param::Bool(false)]);
     }
 
     #[test]

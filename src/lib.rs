@@ -314,6 +314,38 @@ mod tests {
     }
 
     #[test]
+    fn system_error_commands_via_device() {
+        let mut d = device();
+        d.error_queue.push(crate::error::COMMAND_ERROR);
+        d.error_queue.push(crate::error::DATA_OUT_OF_RANGE);
+
+        let responses = d.process(
+            "SYSTem:ERRor:COUNt?;SYSTem:ERRor:ALL?;SYSTem:ERRor?;SYSTem:ERRor:CLEar;SYSTem:ERRor?",
+        );
+
+        assert_eq!(responses.len(), 5);
+        assert_eq!(responses[0], Response::Integer(2));
+        assert_eq!(
+            responses[1],
+            Response::Str(format!(
+                "{},{}",
+                crate::error::COMMAND_ERROR,
+                crate::error::DATA_OUT_OF_RANGE
+            ))
+        );
+        assert_eq!(
+            responses[2],
+            Response::Str(crate::error::COMMAND_ERROR.to_string())
+        );
+        assert_eq!(responses[3], Response::Empty);
+        assert_eq!(
+            responses[4],
+            Response::Str(crate::error::NO_ERROR.to_string())
+        );
+        assert!(d.error_queue.is_empty());
+    }
+
+    #[test]
     fn device_debug_impl() {
         let mut d = device();
         d.register(|_| None);

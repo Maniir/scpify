@@ -23,7 +23,10 @@
 //! | `*WAI`   | Wait-to-continue                    |
 
 use crate::command::{Command, Response};
-use crate::error::{ErrorQueue, ScpiError, MISSING_PARAMETER, NO_ERROR, UNDEFINED_HEADER, UNEXPECTED_NUMBER_OF_PARAMETERS};
+use crate::error::{
+    ErrorQueue, ScpiError, MISSING_PARAMETER, NO_ERROR, UNDEFINED_HEADER,
+    UNEXPECTED_NUMBER_OF_PARAMETERS,
+};
 use serde::{Deserialize, Serialize};
 
 /// SCPI implementation version.
@@ -242,32 +245,45 @@ pub fn handle_system_command(
     error_queue: &mut ErrorQueue,
 ) -> Result<Response, ScpiError> {
     if cmd.matches_header("SYSTem:ERRor:CLEar") && !cmd.is_query {
-        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        if !cmd.params.is_empty() {
+            return Err(UNEXPECTED_NUMBER_OF_PARAMETERS);
+        }
         error_queue.clear();
         return Ok(Response::Empty);
     }
 
     if cmd.matches_header("SYSTem:ERRor:COUNt") && cmd.is_query {
-        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        if !cmd.params.is_empty() {
+            return Err(UNEXPECTED_NUMBER_OF_PARAMETERS);
+        }
         return Ok(Response::Integer(error_queue.len() as i64));
     }
 
     if cmd.matches_header("SYSTem:ERRor:ALL") && cmd.is_query {
-        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
-        if error_queue.is_empty() { return Ok(Response::Str(NO_ERROR.to_string())); }
+        if !cmd.params.is_empty() {
+            return Err(UNEXPECTED_NUMBER_OF_PARAMETERS);
+        }
+        if error_queue.is_empty() {
+            return Ok(Response::Str(NO_ERROR.to_string()));
+        }
         return Ok(Response::Str(error_queue.join()));
     }
 
     if (cmd.matches_header("SYSTem:ERRor:QUEue")
-            || cmd.matches_header("SYSTem:ERRor:NEXt")
-            || cmd.matches_header("SYSTem:ERRor")
-            ) && cmd.is_query {
-        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        || cmd.matches_header("SYSTem:ERRor:NEXt")
+        || cmd.matches_header("SYSTem:ERRor"))
+        && cmd.is_query
+    {
+        if !cmd.params.is_empty() {
+            return Err(UNEXPECTED_NUMBER_OF_PARAMETERS);
+        }
         return Ok(Response::Str(error_queue.pop().to_string()));
     }
 
     if cmd.matches_header("SYSTem:VERSION") && cmd.is_query {
-        if !cmd.params.is_empty() { return Err(UNEXPECTED_NUMBER_OF_PARAMETERS); }
+        if !cmd.params.is_empty() {
+            return Err(UNEXPECTED_NUMBER_OF_PARAMETERS);
+        }
         return Ok(Response::Str(SCPI_IMPLEMENTATION_VERSION.to_string()));
     }
 
@@ -403,5 +419,58 @@ mod tests {
         let cmds = parse("*XYZ?");
         let result = handle_common_command(&cmds[0], &mut state, &mut eq);
         assert_eq!(result, Err(UNDEFINED_HEADER));
+    }
+
+    #[test]
+    fn system_error_query_aliases_pop_fifo() {
+        let mut eq = ErrorQueue::new();
+        eq.push(crate::error::COMMAND_ERROR);
+        eq.push(crate::error::DATA_OUT_OF_RANGE);
+
+        let cmds = parse("SYSTem:ERRor?");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(resp, Response::Str(crate::error::COMMAND_ERROR.to_string()));
+
+        let cmds = parse("SYSTem:ERRor:NEXt?");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(
+            resp,
+            Response::Str(crate::error::DATA_OUT_OF_RANGE.to_string())
+        );
+
+        let cmds = parse("SYSTem:ERRor:QUEue?");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(resp, Response::Str(NO_ERROR.to_string()));
+    }
+
+    #[test]
+    fn system_error_count_all_and_clear_work() {
+        let mut eq = ErrorQueue::new();
+        eq.push(crate::error::COMMAND_ERROR);
+        eq.push(crate::error::DATA_OUT_OF_RANGE);
+
+        let cmds = parse("SYSTem:ERRor:COUNt?");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(resp, Response::Integer(2));
+
+        let cmds = parse("SYSTem:ERRor:ALL?");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(
+            resp,
+            Response::Str(format!(
+                "{},{}",
+                crate::error::COMMAND_ERROR,
+                crate::error::DATA_OUT_OF_RANGE
+            ))
+        );
+
+        let cmds = parse("SYSTem:ERRor:CLEar");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(resp, Response::Empty);
+        assert!(eq.is_empty());
+
+        let cmds = parse("SYSTem:ERRor:COUNt?");
+        let resp = handle_system_command(&cmds[0], &mut eq).unwrap();
+        assert_eq!(resp, Response::Integer(0));
     }
 }
